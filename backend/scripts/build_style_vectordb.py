@@ -112,12 +112,10 @@ def get_qwen_embeddings(texts: list[str], client: OpenAI, batch_size: int = 25) 
     """
     使用 Qwen Embedding 模型生成向量（分批调用）
 
-    Qwen text-embedding-v3 单次最多 25 条，超出需分批。
-
     Args:
         texts: 文本列表
         client: OpenAI 客户端（兼容 Qwen API）
-        batch_size: 单批大小（默认 25，符合 Qwen 限制）
+        batch_size: 单批大小（符合 Qwen 限制）
 
     Returns:
         embeddings: 向量列表（顺序与输入对齐）

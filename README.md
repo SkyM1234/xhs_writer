@@ -86,7 +86,7 @@ human_review
 xhs_writer/
 ├── backend/
 │   ├── app/
-│   │   ├── agents/                    # LangGraph 核心
+│   │   ├── agents/                  # LangGraph 核心
 │   │   │   ├── graph.py              # 工作流定义
 │   │   │   ├── nodes.py              # 智能体节点实现
 │   │   │   ├── state.py              # 状态管理
@@ -119,7 +119,8 @@ xhs_writer/
 │   ├── requirements.txt              # Python 依赖
 │   ├── data/                         # 数据目录
 │   ├── logs/                         # 日志目录
-│   └── checkpoints/                  # LangGraph 检查点
+│   ├── checkpoints/                  # LangGraph 检查点
+|   └── scripts/                      # 脚本目录
 ├── frontend/
 │   ├── src/
 │   │   ├── api/                      # API 封装
@@ -186,7 +187,13 @@ IMAGE_PROVIDER=qwen
 IMAGE_API_KEY=your_qwen_api_key
 ```
 
-3. 启动后端
+3. 构建风格向量库
+```bash
+cd backend
+python scripts/build_style_vectordb.py
+```
+
+4. 启动后端
 ```bash
 cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000
@@ -209,7 +216,7 @@ npm run dev
 
 前端将运行在 `http://localhost:5173`
 
-## � 使用指南
+## 📖 使用指南
 
 ### 1. 创建内容生成任务
 
@@ -248,7 +255,7 @@ npm run dev
 - 点击"恢复"继续执行
 - 点击"删除"清理任务
 
-## �🔧 配置说明
+## 🔧 配置说明
 
 ### LLM 配置
 
