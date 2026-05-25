@@ -1,0 +1,27 @@
+# MediaCrawler 
+
+# 核心依赖
+httpx==0.28.1                    # HTTP 客户端
+playwright==1.45.0               # 浏览器自动化
+tenacity==8.2.2                  # 重试机制
+typer>=0.12.3                    # 命令行参数解析
+pydantic==2.5.2                  # 数据验证
+aiofiles~=23.2.1                 # 异步文件操作
+python-dotenv==1.0.1             # 环境变量管理
+
+# 图片/视频处理
+Pillow==12.1.0                   # 图片处理
+opencv-python                    # 视频处理
+
+# 数据处理
+parsel==1.9.1                    # HTML/XML 解析
+pyexecjs==1.5.1                  # JavaScript 执行
+pyhumps==3.8.0                   # 命名转换
+requests==2.32.3                 # HTTP 请求
+
+# 小红书特定
+xhshow>=0.1.9                    # 小红书签名
+
+# 测试（可选）
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

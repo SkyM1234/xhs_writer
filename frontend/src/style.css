@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border-primary;
+  }
+  
+  body {
+    @apply bg-bg-primary text-text-primary font-sans antialiased;
+  }
+}
+
+@layer components {
+  /* 玻璃态效果 */
+  .glass {
+    @apply bg-bg-secondary/70 backdrop-blur-glass border border-white/10;
+  }
+  
+  /* 按钮基础样式 */
+  .btn {
+    @apply px-6 py-2.5 rounded-lg font-medium transition-all duration-200;
+    @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-bg-primary;
+  }
+  
+  .btn-primary {
+    @apply bg-primary hover:bg-primary-hover text-white;
+  }
+  
+  .btn-secondary {
+    @apply bg-bg-tertiary hover:bg-bg-tertiary/80 text-text-primary;
+  }
+  
+  /* 输入框样式 */
+  .input {
+    @apply w-full px-4 py-2.5 rounded-lg bg-bg-secondary border border-border-primary;
+    @apply text-text-primary placeholder:text-text-muted;
+    @apply focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent;
+    @apply transition-all duration-200;
+  }
+  
+  /* 卡片样式 */
+  .card {
+    @apply glass rounded-xl p-6 shadow-glass;
+  }
+  
+  /* 节点卡片样式 */
+  .node-card {
+    @apply card min-w-[200px] shadow-node hover:shadow-node-hover;
+    @apply transition-all duration-200 cursor-pointer;
+  }
+}
+
+@layer utilities {
+  /* 滚动条样式 */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-bg-secondary rounded-full;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-border-secondary rounded-full hover:bg-text-muted;
+  }
+}

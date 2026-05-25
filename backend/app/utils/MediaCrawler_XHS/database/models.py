@@ -1,0 +1,16 @@
+# -*- coding: utf-8 -*-
+# 兼容层：重定向到项目根目录的数据库模块
+# 这样爬虫内部代码可以继续使用 "from database.models import XhsNote"
+
+import sys
+from pathlib import Path
+
+# 添加项目根目录到路径
+project_root = Path(__file__).resolve().parents[4]  # backend/
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+# 从项目数据库模块导入
+from app.database.models import Base, XhsCreator, XhsNote, XhsNoteComment
+
+__all__ = ['Base', 'XhsCreator', 'XhsNote', 'XhsNoteComment']
