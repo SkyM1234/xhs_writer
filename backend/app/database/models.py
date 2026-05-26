@@ -57,10 +57,15 @@ class XhsNote(Base):
     comment_count_num = Column(Integer, default=0, index=True, comment='评论数（数值）')
     share_count_num = Column(Integer, default=0, comment='分享数（数值）')
     image_list = Column(Text, comment='图片列表')
+    video_url = Column(Text, comment='视频URL')
+    local_media_path = Column(Text, comment='本地媒体文件路径（JSON格式）')
     tag_list = Column(Text, comment='标签列表')
     note_url = Column(Text, comment='笔记URL')
     source_keyword = Column(Text, default='', comment='来源关键词')
     xsec_token = Column(Text, comment='Xsec Token')
+    media_description = Column(Text, comment='图片/视频的文字描述（VL模型生成）')
+    media_summary = Column(Text, comment='图片/视频内容总结（LLM生成）')
+    media_analysis_status = Column(String(50), default='pending', comment='媒体分析状态: pending/processing/completed/failed')
 
 
 class XhsNoteComment(Base):

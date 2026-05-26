@@ -17,6 +17,7 @@ from sqlalchemy import select, and_, or_
 # 导入项目数据库模块（不再从 MediaCrawler 导入）
 from app.database.session import get_session
 from app.database.models import XhsNote
+from app.core.logger import logger
 
 
 class XhsCrawlerService:
@@ -113,7 +114,10 @@ class XhsCrawlerService:
             "url": note.note_url,
             "content_type": note.type,
             "keyword_used": note.source_keyword,
-            "last_update_time": note.last_update_time
+            "last_update_time": note.last_update_time,
+            "media_description": note.media_description if hasattr(note, 'media_description') else None,
+            "media_summary": note.media_summary if hasattr(note, 'media_summary') else None,
+            "media_analysis_status": note.media_analysis_status if hasattr(note, 'media_analysis_status') else 'pending'
         }
     
     def _parse_count(self, count_str: str) -> int:
@@ -238,8 +242,15 @@ class XhsCrawlerService:
             
             # 计算新增的笔记数量（新ID - 旧ID）
             new_note_ids = after_note_ids - before_note_ids
+
+            # 同步分析新增笔记的图片/视频（确保数据完整）
+            if new_note_ids:
+                logger.info(f"🔄 开始分析 {len(new_note_ids)} 条新笔记的图片/视频...")
+                await self._analyze_new_notes_media(list(new_note_ids))
+                logger.info(f"✅ 图片/视频分析完成，数据已保存到数据库")
+
             return len(new_note_ids)
-            
+
         finally:
             # 恢复原始配置
             config.SAVE_DATA_OPTION = original_save_data_option
@@ -283,6 +294,149 @@ class XhsCrawlerService:
             error_msg = str(e).lower()
             if "closed" not in error_msg and "disconnected" not in error_msg:
                 print(f"[XhsCrawlerService] Error cleaning up crawler: {e}")
+
+    async def _analyze_new_notes_media(self, note_ids: List[str]):
+        """
+        分析新爬取笔记的图片/视频（带本地文件保底逻辑）
+
+        Args:
+            note_ids: 笔记ID列表
+        """
+        try:
+            from app.services.vision_analysis_service import vision_analysis_service
+            import json
+
+            async with get_session() as session:
+                # 查询这些笔记
+                stmt = select(XhsNote).where(XhsNote.note_id.in_(note_ids))
+                result = await session.execute(stmt)
+                notes = result.scalars().all()
+
+            success_count = 0
+            for note in notes:
+                try:
+                    # 构建上下文
+                    context = f"标题：{note.title}\n描述：{note.desc[:200] if note.desc else ''}"
+
+                    # 判断是图文还是视频
+                    is_video = note.type == 'video' or (note.video_url and note.video_url.strip())
+
+                    # 解析本地文件路径（如果有）
+                    local_paths = None
+                    local_video_path = None
+                    if hasattr(note, 'local_media_path') and note.local_media_path:
+                        try:
+                            local_media = json.loads(note.local_media_path)
+                            local_paths = local_media.get('images', [])
+                            local_video_path = local_media.get('video')
+                        except:
+                            pass
+
+                    if is_video and note.video_url:
+                        # 分析视频（带保底逻辑）
+                        logger.info(f"🔄 分析笔记 {note.note_id} 的视频...")
+
+                        # 更新状态为处理中
+                        async with get_session() as session:
+                            stmt = select(XhsNote).where(XhsNote.note_id == note.note_id)
+                            result = await session.execute(stmt)
+                            db_note = result.scalar_one_or_none()
+                            if db_note:
+                                db_note.media_analysis_status = 'processing'
+                                await session.commit()
+
+                        # 分析视频（优先URL，失败时用本地文件）
+                        description = await vision_analysis_service.analyze_video_with_fallback(
+                            note.video_url,
+                            local_path=local_video_path,
+                            context=context
+                        )
+
+                        # 生成总结
+                        summary = await vision_analysis_service.summarize_media_description(
+                            description,
+                            context=context
+                        )
+
+                        # 保存到数据库
+                        async with get_session() as session:
+                            stmt = select(XhsNote).where(XhsNote.note_id == note.note_id)
+                            result = await session.execute(stmt)
+                            db_note = result.scalar_one_or_none()
+
+                            if db_note:
+                                db_note.media_description = f"[视频内容]: {description}"
+                                db_note.media_summary = summary
+                                db_note.media_analysis_status = 'completed'
+                                await session.commit()
+                                success_count += 1
+                                logger.info(f"✅ 笔记 {note.note_id} 视频分析完成")
+
+                    elif note.image_list:
+                        # 分析图片（带保底逻辑）
+                        # 解析图片列表
+                        image_urls = [url.strip() for url in note.image_list.split(',') if url.strip()]
+                        if not image_urls:
+                            continue
+
+                        # 更新状态为处理中
+                        async with get_session() as session:
+                            stmt = select(XhsNote).where(XhsNote.note_id == note.note_id)
+                            result = await session.execute(stmt)
+                            db_note = result.scalar_one_or_none()
+                            if db_note:
+                                db_note.media_analysis_status = 'processing'
+                                await session.commit()
+
+                        # 批量分析图片（优先URL，失败时用本地文件）
+                        logger.info(f"🔄 分析笔记 {note.note_id} 的 {len(image_urls)} 张图片...")
+                        description = await vision_analysis_service.analyze_images_batch_with_fallback(
+                            image_urls,
+                            local_paths=local_paths,
+                            context=context,
+                            max_images=9
+                        )
+
+                        # 生成总结
+                        summary = await vision_analysis_service.summarize_media_description(
+                            description,
+                            context=context
+                        )
+
+                        # 保存到数据库
+                        async with get_session() as session:
+                            stmt = select(XhsNote).where(XhsNote.note_id == note.note_id)
+                            result = await session.execute(stmt)
+                            db_note = result.scalar_one_or_none()
+
+                            if db_note:
+                                db_note.media_description = description
+                                db_note.media_summary = summary
+                                db_note.media_analysis_status = 'completed'
+                                await session.commit()
+                                success_count += 1
+                                logger.info(f"✅ 笔记 {note.note_id} 图片分析完成")
+
+                except Exception as e:
+                    logger.error(f"❌ 笔记 {note.note_id} 媒体分析失败: {str(e)}")
+                    # 更新状态为失败
+                    try:
+                        async with get_session() as session:
+                            stmt = select(XhsNote).where(XhsNote.note_id == note.note_id)
+                            result = await session.execute(stmt)
+                            db_note = result.scalar_one_or_none()
+                            if db_note:
+                                db_note.media_analysis_status = 'failed'
+                                db_note.media_description = f'[分析失败: {str(e)}]'
+                                await session.commit()
+                    except Exception:
+                        pass
+
+            logger.info(f"✅ 媒体分析完成: {success_count}/{len(notes)} 条笔记")
+
+        except Exception as e:
+            logger.error(f"❌ 批量媒体分析失败: {str(e)}")
+
 
 
 # 全局服务实例

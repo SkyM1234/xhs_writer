@@ -139,7 +139,21 @@ MYSQL_DATABASE: str = "xhs_crawler"
 - 作者信息：`user_id`, `nickname`, `avatar`, `ip_location`
 - 互动数据：`liked_count`, `collected_count`, `comment_count`, `share_count`
 - 时间信息：`time`, `last_update_time`
-- 其他：`image_list`, `tag_list`, `note_url`, `source_keyword`
+- 媒体内容：`image_list`, `video_url`
+- **媒体分析**（自动生成）：
+  - `media_description`：详细的图片/视频描述（Qwen VL生成）
+  - `media_summary`：精简总结（LLM 生成，200字内）⭐
+  - `media_analysis_status`：分析状态
+- 其他：`tag_list`, `note_url`, `source_keyword`
+
+**配置要求**：
+```bash
+# 需要设置以下环境变量
+export QWEN_API_KEY="your_qwen_api_key"      # 用于图片/视频分析
+export LLM_API_KEY="your_deepseek_api_key"   # 用于生成总结
+```
+
+详细文档：`backend/MEDIA_ANALYSIS_COMPLETE.md`
 
 ## 注意事项
 

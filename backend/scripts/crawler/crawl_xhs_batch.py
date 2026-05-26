@@ -51,6 +51,7 @@ async def run_task(crawler_service: XhsCrawlerService, task: Dict, task_index: i
     logger.info(f"📅 时间范围: {'不限制' if days == 0 else f'最近{days}天'}")
     
     try:
+        logger.info("🕷️ 开始爬取笔记...")
         new_count = await crawler_service.crawl_notes(
             keywords=task['keywords'],
             topic_words=task.get('topic_words', []),
@@ -60,8 +61,9 @@ async def run_task(crawler_service: XhsCrawlerService, task: Dict, task_index: i
             days=days,
             target_count=task.get('count', 20)
         )
-        
+
         logger.info(f"✅ 任务完成！新增笔记数: {new_count}")
+        logger.info(f"📊 注意：新增笔记的图片/视频已自动分析并生成总结")
         return {'task': task_name, 'success': True, 'new_count': new_count}
         
     except Exception as e:

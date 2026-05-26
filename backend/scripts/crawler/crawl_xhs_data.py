@@ -125,7 +125,7 @@ async def main():
     
     try:
         # 执行爬取
-        logger.info("🔄 开始爬取数据...")
+        logger.info("🕷️ 开始爬取数据...")
         new_count = await crawler_service.crawl_notes(
             keywords=keywords,
             topic_words=topic_words,
@@ -135,9 +135,11 @@ async def main():
             days=args.days,
             target_count=args.count
         )
-        
+
         logger.info("=" * 60)
         logger.info(f"✅ 爬取完成！新增笔记数: {new_count}")
+        logger.info(f"📊 注意：新增笔记的图片/视频已自动分析并生成总结")
+        logger.info(f"💡 提示：数据库字段 media_summary 包含精简总结（100字内）")
         logger.info("=" * 60)
         
     except KeyboardInterrupt:

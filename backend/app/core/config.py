@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     
     # LLM 配置
-    LLM_PROVIDER: str = "deepseek"  # qwen / openai / deepseek
+    LLM_PROVIDER: str = "qwen"  # qwen / openai / deepseek
     LLM_MODEL: str = "deepseek-v4-flash"
     LLM_EMBEDDING_MODEL: str = "text-embedding-v1"
     LLM_JUDAGE_MODEL: str = "deepseek-v4-pro" # 评分模型

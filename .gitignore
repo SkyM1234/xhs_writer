@@ -50,6 +50,8 @@ backend/checkpoints/
 backend/data/outputs/
 backend/data/vectordb/
 backend/*.png
+backend/data/xhs/
+
 
 # Environment variables
 .env

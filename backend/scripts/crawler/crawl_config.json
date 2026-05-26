@@ -4,31 +4,11 @@
       "name": "Python编程相关",
       "keywords": ["Python编程"],
       "topic_words": [],
-      "min_likes": 100,
-      "min_comments": 20,
-      "min_favorites": 20,
-      "days": 30,
-      "count": 10
-    },
-    {
-      "name": "AI绘画相关",
-      "keywords": ["AI绘画"],
-      "topic_words": [],
-      "min_likes": 100,
-      "min_comments": 20,
-      "min_favorites": 20,
-      "days": 30,
-      "count": 10
-    },
-    {
-      "name": "机器学习相关",
-      "keywords": ["深度学习"],
-      "topic_words": [],
-      "min_likes": 100,
-      "min_comments": 20,
-      "min_favorites": 20,
-      "days": 30,
-      "count": 10
+      "min_likes": 0,
+      "min_comments": 0,
+      "min_favorites": 0,
+      "days": 90,
+      "count": 4
     }
   ]
 }
