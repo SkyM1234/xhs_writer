@@ -29,13 +29,13 @@ class Settings(BaseSettings):
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
-    MYSQL_PASSWORD: str = "your_password"
+    MYSQL_PASSWORD: str = "skc393720"
     MYSQL_DATABASE: str = "xhs_crawler"
     
     # 图片生成配置
     IMAGE_PROVIDER: str = "qwen"  # qwen / dalle / midjourney
     IMAGE_API_KEY: Optional[str] = None
-    IMAGE_MODEL: str = "wanx-v1"  # Qwen 图片生成模型
+    IMAGE_MODEL: str = "wan2.6-image"  # Qwen 图片生成模型
     IMAGE_SIZE: str = "1024*1024"  # 图片尺寸: 1024*1024, 720*1280, 1280*720
     IMAGE_COUNT: int = 1  # 每次生成图片数量（1-4）
 

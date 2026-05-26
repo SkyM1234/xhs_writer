@@ -232,7 +232,7 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
     try:
         # 构建分析提示词
         notes_summary = "\n\n".join([
-            f"【笔记{i+1}】\n标题：{note['title']}\n内容摘要：{note['content']}\n标签：{', '.join(note['tags'][:5])}\n互动数据：👍{note['engagement']['likes']} 💾{note['engagement']['favorites']} 💬{note['engagement']['comments']}"
+            f"【笔记{i+1}】\n标题：{note['title']}\n内容：{note['content']}\n标签：{', '.join(note['tags'])}\n互动数据：👍{note['engagement']['likes']} 💾{note['engagement']['favorites']} 💬{note['engagement']['comments']}"
             for i, note in enumerate(top_notes)
         ])
 
