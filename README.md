@@ -263,8 +263,8 @@ npm run dev
 支持多个 LLM 提供商，在 `backend/app/core/config.py` 中配置：
 
 ```python
-LLM_PROVIDER = "deepseek"  # deepseek / qwen / openai
-LLM_MODEL = "deepseek-chat"
+LLM_PROVIDER = "qwen"  # deepseek / qwen / openai
+LLM_MODEL = "deepseek-v4-flash"
 LLM_TEMPERATURE = 0.7
 LLM_MAX_TOKENS = 2000
 ```
