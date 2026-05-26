@@ -125,7 +125,7 @@ python scripts/crawler/crawl_xhs_batch.py --delay 30
 MYSQL_HOST: str = "localhost"
 MYSQL_PORT: int = 3306
 MYSQL_USER: str = "root"
-MYSQL_PASSWORD: str = "your_password"
+MYSQL_PASSWORD: str = "your_password" or os.getenv("REDIS_PASSWORD")
 MYSQL_DATABASE: str = "xhs_crawler"
 ```
 

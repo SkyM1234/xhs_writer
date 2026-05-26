@@ -3,6 +3,7 @@
 """
 from pydantic_settings import BaseSettings
 from typing import Optional
+import os
 
 
 class Settings(BaseSettings):
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
-    MYSQL_PASSWORD: str = "skc393720"
+    MYSQL_PASSWORD: str = os.getenv("REDIS_PASSWORD")
     MYSQL_DATABASE: str = "xhs_crawler"
     
     # 图片生成配置
