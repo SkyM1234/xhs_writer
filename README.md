@@ -168,7 +168,7 @@ playwright install chromium  # 安装浏览器驱动
 ```bash
 # LLM 配置
 LLM_PROVIDER=deepseek  # deepseek / qwen / openai
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
 LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://api.deepseek.com
 
