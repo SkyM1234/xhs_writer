@@ -5,9 +5,6 @@ from typing import Dict
 import json
 from .state import GraphState
 from .tools import (
-    select_content_angle,
-    infer_target_audience,
-    generate_hook,
     calculate_heat_score,
     check_sensitive_words,
     extract_title_pattern,
@@ -244,22 +241,12 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
 你的任务是分析这些高互动笔记，提取出可复用的爆款特征。
 
 请从以下维度进行分析：
-1. **标题特征**：常用的标题模式、钩子类型、情绪词汇
-2. **内容结构**：开头方式、核心内容组织、结尾方式
-3. **话题切入点**：用户关注的痛点、需求、场景
-4. **情绪共鸣点**：引发共鸣的情绪类型（焦虑、好奇、惊喜等）
-5. **标签策略**：高频标签、标签组合模式
+1. **话题切入点**：用户关注的痛点、需求、场景
+2. **情绪共鸣点**：引发共鸣的情绪类型（焦虑、好奇、惊喜等）
+3. **标签策略**：高频标签、标签组合模式
 
 请以 JSON 格式输出分析结果，格式如下：
 {
-  "title_patterns": [
-    {"pattern": "反直觉型", "example": "没想到xxx", "frequency": 3},
-    {"pattern": "利益型", "example": "xxx必看", "frequency": 5}
-  ],
-  "content_structures": [
-    {"type": "痛点共鸣开头", "description": "先描述用户痛点引发共鸣"},
-    {"type": "三段式干货", "description": "分点列举核心要点"}
-  ],
   "pain_points": ["时间不够", "效率低下", "不知道怎么开始"],
   "emotion_triggers": ["焦虑", "好奇", "惊喜"],
   "hot_tags": ["干货分享", "实用技巧", "新手必看"],
@@ -296,8 +283,6 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
         except json.JSONDecodeError:
             # JSON 解析失败，使用基础分析
             llm_analysis = {
-                "title_patterns": [{"pattern": "未知", "example": "", "frequency": 0}],
-                "content_structures": [],
                 "pain_points": [],
                 "emotion_triggers": [],
                 "hot_tags": [],
@@ -323,8 +308,6 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
     except Exception as e:
         # LLM 调用失败，降级到基础分析
         llm_analysis = {
-                "title_patterns": [{"pattern": "未知", "example": "", "frequency": 0}],
-                "content_structures": [],
                 "pain_points": [],
                 "emotion_triggers": [],
                 "hot_tags": [],
@@ -360,10 +343,10 @@ async def strategist_node(state: GraphState) -> Dict:
                 'messages': ['❌ 选题策划失败：未提供关键词']
             }
 
-        persona = state.get('account_persona', '专业分享者')
+        persona = state.get('account_persona', '')
+        if not persona or len(persona.strip()) == 0:
+            persona = '专业分享者'
 
-        # 使用主关键词（第一个）
-        main_keyword = keywords[0] if keywords else "主题"
         keywords_str = "、".join(keywords)
 
         # 从state中获取 LLM 分析结果
@@ -371,41 +354,31 @@ async def strategist_node(state: GraphState) -> Dict:
         pain_points = llm_analysis.get('pain_points', [])
         emotion_triggers = llm_analysis.get('emotion_triggers', ['实用'])
         key_insights = llm_analysis.get('key_insights', '')
-
-        # 选择内容角度
-        angle = select_content_angle(persona, main_keyword, emotion_triggers, pain_points)
-        target_audience = infer_target_audience(keywords, pain_points)
-        hook = generate_hook(main_keyword, emotion_triggers, pain_points)
+        hot_tags = llm_analysis.get('hot_tags', [])
 
         # 构建策略
         strategy = {
             'persona': persona,
-            'angle': angle,
-            'target_audience': target_audience,
-            'emotion_point': '、'.join(emotion_triggers[:3]) if emotion_triggers else '实用、干货、避坑',
-            'hook': hook,
+            'emotion_point': '；'.join(emotion_triggers) if emotion_triggers else '实用、干货、避坑',
             'keywords': keywords,
             'keywords_str': keywords_str,
-            'pain_points': pain_points[:3] if pain_points else [],
-            'llm_insights': key_insights[:100] if key_insights else '',
+            'pain_points': pain_points if pain_points else [],
+            'llm_insights': key_insights if key_insights else '',
+            'hot_tags': hot_tags
         }
 
         # 发送节点完成信号
         if task_id:
             await ws_manager.send_node_complete(task_id, "strategist", "选题策划", {
-                "angle": strategy["angle"],
-                "target_audience": strategy["target_audience"],
-                "hook": strategy["hook"]
+                "keywords": keywords_str,
+                "llm_insights": key_insights
             })
 
         return {
             'strategy': strategy,
             'messages': [
                 f'✅ 选题策划完成，关键词：{keywords_str}',
-                f'📍 策略角度：{strategy["angle"]}',
-                f'� 目标受众：{strategy["target_audience"]}',
-                f'🎣 内容钩子：{strategy["hook"]}',
-                f'�💡 核心洞察：{strategy["llm_insights"][:50]}...' if strategy["llm_insights"] else ''
+                f'💡 核心洞察：{strategy["llm_insights"][:50]}...' if strategy["llm_insights"] else ''
             ]
         }
 
@@ -424,13 +397,14 @@ async def strategist_node(state: GraphState) -> Dict:
 
 
 async def title_lab_node(state: GraphState) -> Dict:
-    """标题实验室 - 使用 LLM 生成3个候选标题"""
+    """标题实验室 - 使用 LLM 生成5个候选标题"""
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
     if task_id:
         await ws_manager.send_node_start(task_id, "title_lab", "标题生成")
-
+    
+    # 从state中获取 LLM 分析结果
     keywords = state['keywords']
     strategy = state['strategy']
 
@@ -438,30 +412,26 @@ async def title_lab_node(state: GraphState) -> Dict:
     main_keyword = keywords[0] if keywords else "主题"
     keywords_str = strategy.get('keywords_str', main_keyword)
 
-    # 从state中获取 LLM 分析结果
-    llm_analysis = state.get('llm_analysis', {})
-    title_patterns = llm_analysis.get('title_patterns', [])
+    # 从策略中获取信息
     pain_points = strategy.get('pain_points', [])
+    llm_insights = strategy.get('llm_insights', '')
+    hot_tags = strategy.get('hot_tags', [])
 
     try:
         # 构建标题生成提示词
-        patterns_desc = "\n".join([
-            f"- {p['pattern']}：{p.get('example', '')} (出现{p.get('frequency', 0)}次)"
-            for p in title_patterns[:5]
-        ]) if title_patterns else "- 利益型：突出实用价值\n- 反直觉型：制造惊喜感\n- 悬念型：引发好奇"
-
-        pain_points_desc = "、".join(pain_points) if pain_points else "效率低、不知道怎么做、容易出错"
+        pain_points_desc = "；".join(pain_points) if pain_points else "效率低、不知道怎么做、容易出错"
+        llm_insights_desc = llm_insights if llm_insights else "无"
+        hot_tags_desc = "、".join(hot_tags) if hot_tags else "无"
 
         system_prompt = """你是一位小红书爆款标题专家，擅长创作高点击率的标题。
 
 小红书标题的黄金法则：
 1. 长度控制在15-25字
-2. 使用1-2个 Emoji 增强视觉吸引力
-3. 包含核心关键词
-4. 制造情绪钩子（好奇、焦虑、惊喜、利益、共鸣）
-5. 避免标题党和夸张表述
+2. 包含核心关键词
+3. 制造情绪钩子（好奇、焦虑、惊喜、利益、共鸣）
+4. 避免标题党和夸张表述
 
-请生成3个不同角度的标题，每个标题要：
+请生成5个不同角度的标题，每个标题要：
 - 符合小红书平台调性
 - 针对用户痛点
 - 有明确的情绪钩子
@@ -471,16 +441,18 @@ async def title_lab_node(state: GraphState) -> Dict:
 输出格式（纯文本，每行一个标题，不要添加编号、类型标签或任何前缀）：
 第一个标题
 第二个标题
-第三个标题"""
+第三个标题
+第四个标题
+第五个标题"""
 
         user_prompt = f"""关键词：{keywords_str}
 用户痛点：{pain_points_desc}
 人设角度：{strategy.get('persona', '专业分享者')}
 
-参考的爆款标题模式：
-{patterns_desc}
+爆款笔记核心洞察：{llm_insights_desc}
+爆款笔记热门标签：{hot_tags_desc}
 
-请生成3个不同角度的小红书标题，每个标题从不同维度切入（如：实用价值、情感共鸣、反常识、故事化等），让用户有多样化的选择。"""
+请生成5个不同角度的小红书标题，每个标题从不同维度切入（如：实用价值、情感共鸣、反常识、故事化等），让用户有多样化的选择。"""
 
         # 调用 LLM
         llm_response = await llm_client.chat_with_system(
@@ -492,19 +464,20 @@ async def title_lab_node(state: GraphState) -> Dict:
         )
 
         # 解析标题（健壮解析，兼容多种 LLM 输出格式）
-        print("llm_response:", llm_response)
         title_candidates = parse_title_candidates(llm_response)
 
         # 如果解析失败，使用降级方案（默认标题）
-        if len(title_candidates) < 3:
-            log_error('title_lab_parse', ValueError(f'LLM 返回的标题数量不足：期望3个，实际{len(title_candidates)}个'), state)
+        if len(title_candidates) < 5:
+            log_error('title_lab_parse', ValueError(f'LLM 返回的标题数量不足：期望5个，实际{len(title_candidates)}个'), state)
             error_history = add_error_to_history(state, 'title_lab', ValueError('标题解析失败'))
             degraded_nodes = add_degraded_node(state, 'title_lab')
 
             title_candidates = [
                 f'🔥{main_keyword}必看！这些技巧让你少走弯路',
                 f'没想到{main_keyword}还能这样玩？我震惊了',
-                f'关于{main_keyword}，你真的了解吗？'
+                f'关于{main_keyword}，你真的了解吗？',
+                f'{main_keyword}避坑指南！新手必看',
+                f'超实用！{main_keyword}的正确打开方式'
             ]
 
             # 发送节点完成信号
@@ -537,7 +510,9 @@ async def title_lab_node(state: GraphState) -> Dict:
                 f'✅ 标题生成完成，共 {len(title_candidates)} 个候选标题',
                 f'📝 标题1: {title_candidates[0][:30]}...',
                 f'📝 标题2: {title_candidates[1][:30]}...',
-                f'📝 标题3: {title_candidates[2][:30]}...'
+                f'📝 标题3: {title_candidates[2][:30]}...',
+                f'📝 标题4: {title_candidates[3][:30]}...',
+                f'📝 标题5: {title_candidates[4][:30]}...'
             ]
         }
 
@@ -550,7 +525,9 @@ async def title_lab_node(state: GraphState) -> Dict:
         title_candidates = [
             f'🔥{main_keyword}必看！这些技巧让你少走弯路',
             f'没想到{main_keyword}还能这样玩？我震惊了',
-            f'关于{main_keyword}，你真的了解吗？'
+            f'关于{main_keyword}，你真的了解吗？',
+            f'{main_keyword}避坑指南！新手必看',
+            f'超实用！{main_keyword}的正确打开方式'
         ]
 
         # 发送节点完成信号
@@ -624,16 +601,8 @@ async def copywriter_node(state: GraphState) -> Dict:
         keywords_str = strategy.get('keywords_str', main_keyword)
 
         # 从state中获取 LLM 分析结果
-        llm_analysis = state.get('llm_analysis', {})
-        content_structures = llm_analysis.get('content_structures', [])
         pain_points = strategy.get('pain_points', [])
         emotion_triggers = strategy.get('emotion_point', '实用、干货')
-
-        # 构建文案生成提示词
-        structures_desc = "\n".join([
-            f"- {s.get('type', '')}：{s.get('description', '')}"
-            for s in content_structures[:3]
-        ]) if content_structures else "- 痛点共鸣开头\n- 三段式干货内容\n- 行动号召结尾"
 
         pain_points_desc = "\n".join([f"- {p}" for p in pain_points]) if pain_points else "- 不知道怎么开始\n- 容易出错\n- 效率低下"
 
@@ -752,6 +721,13 @@ async def copywriter_node(state: GraphState) -> Dict:
 - 不要有广告和引流信息
 - 语气轻松但不浮夸
 
+⚠️ 真实性要求（重要）：
+- **禁止虚构人际关系**：不要编造"我朋友"、"我亲戚"、"我认识的人"、"我同事"、"我室友"等虚构人物
+- **使用第一人称直接经验**：用"我自己"、"我发现"、"我试过"、"我的经验"等直接表达
+- **客观表达替代**：如需引用案例，使用"很多人"、"常见的情况是"、"网上经常看到"等客观表达
+- **聚焦方法论**：直接分享干货、技巧、步骤，不需要通过他人故事来包装
+- **可验证性**：内容应基于可验证的事实、方法、现象，而非虚构的个人故事
+
 请写一篇自然流畅的小红书内容。"""
 
         user_prompt = f"""标题：{selected_title}
@@ -762,9 +738,6 @@ async def copywriter_node(state: GraphState) -> Dict:
 
 用户痛点：
 {pain_points_desc}
-
-参考的爆款内容结构：
-{structures_desc}
 
 {style_guidance}{feedback_section}
 

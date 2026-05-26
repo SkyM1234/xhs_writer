@@ -57,17 +57,6 @@
                   <p class="text-lg font-medium text-text-primary leading-relaxed">
                     {{ title }}
                   </p>
-                  
-                  <!-- 标题风格标签 -->
-                  <div class="mt-2 flex gap-2">
-                    <span
-                      v-for="tag in getTitleTags(index)"
-                      :key="tag"
-                      class="text-xs px-2 py-1 rounded bg-bg-tertiary text-text-secondary"
-                    >
-                      {{ tag }}
-                    </span>
-                  </div>
                 </div>
               </div>
             </div>
@@ -119,16 +108,6 @@ watch(() => props.modelValue, (newVal) => {
     selectedIndex.value = null
   }
 })
-
-// 获取标题风格标签
-function getTitleTags(index: number): string[] {
-  const tags = [
-    ['反直觉', '悬念'],
-    ['利益型', '实用'],
-    ['情绪共鸣', '故事']
-  ]
-  return tags[index] || []
-}
 
 // 关闭对话框（发送暂缓请求）
 function handleClose() {

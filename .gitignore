@@ -64,3 +64,6 @@ desktop.ini
 # Temporary files
 *.tmp
 *.temp
+
+# config
+backend/app/core/config.py

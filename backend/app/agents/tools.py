@@ -4,148 +4,6 @@ Agent 使用的工具函数
 from typing import List, Dict
 import re
 
-def select_content_angle(persona: str, keyword: str, emotion_triggers: list, pain_points: list) -> str:
-    """根据人设和情绪点选择内容角度"""
-    import random
-
-    # 角度模板库
-    angle_templates = {
-        '专业分享者': [
-            f'从专业角度深度解析{keyword}',
-            f'系统化梳理{keyword}的核心要点',
-            f'专业人士的{keyword}实战经验',
-            f'{keyword}的底层逻辑和方法论'
-        ],
-        '新手小白': [
-            f'新手视角：我是如何掌握{keyword}的',
-            f'零基础学{keyword}的完整路径',
-            f'小白踩坑后总结的{keyword}经验',
-            f'从零到一学{keyword}的真实记录'
-        ],
-        '生活博主': [
-            f'日常生活中的{keyword}小技巧',
-            f'用{keyword}提升生活品质',
-            f'分享我的{keyword}日常实践',
-            f'{keyword}让生活更美好的N种方式'
-        ],
-        '职场达人': [
-            f'职场必备的{keyword}技能',
-            f'{keyword}助力职场进阶',
-            f'高效职场人的{keyword}秘诀',
-            f'用{keyword}提升职场竞争力'
-        ],
-        '学习博主': [
-            f'高效学习{keyword}的方法',
-            f'{keyword}学习路线图',
-            f'我的{keyword}学习心得',
-            f'如何快速掌握{keyword}'
-        ]
-    }
-
-    # 根据情绪点调整角度
-    if '焦虑' in emotion_triggers or '避坑' in ''.join(pain_points):
-        return f'{keyword}避坑指南：少走弯路的关键经验'
-    elif '好奇' in emotion_triggers or '惊喜' in emotion_triggers:
-        return f'你不知道的{keyword}秘密'
-    elif '实用' in emotion_triggers or '干货' in emotion_triggers:
-        return angle_templates.get(persona, [f'从{persona}的角度分享{keyword}经验'])[0]
-
-    # 默认从模板库随机选择
-    templates = angle_templates.get(persona, [f'从{persona}的角度分享{keyword}经验'])
-    return random.choice(templates)
-
-
-def infer_target_audience(keywords: list, pain_points: list) -> str:
-    """根据关键词和痛点推断目标受众"""
-    pain_points_str = ''.join(pain_points).lower()
-    keywords_str = ''.join(keywords).lower()
-
-    # 新手相关
-    if any(word in pain_points_str for word in ['新手', '不知道', '入门', '零基础', '怎么开始']):
-        return '刚接触该领域的新手用户'
-
-    # 效率相关
-    if any(word in pain_points_str for word in ['效率', '时间', '快速', '速成']):
-        return '追求效率提升的进阶用户'
-
-    # 避坑相关
-    if any(word in pain_points_str for word in ['避坑', '错误', '失败', '踩坑']):
-        return '想要避免常见错误的学习者'
-
-    # 职场相关
-    if any(word in keywords_str for word in ['职场', '工作', '面试', '简历']):
-        return '职场人士和求职者'
-
-    # 学习相关
-    if any(word in keywords_str for word in ['学习', '考试', '备考', '提升']):
-        return '自我提升的学习者'
-
-    # 生活相关
-    if any(word in keywords_str for word in ['生活', '日常', '家居', '美食']):
-        return '注重生活品质的用户'
-
-    return '对该主题感兴趣的所有用户'
-
-
-def generate_hook(keyword: str, emotion_triggers: list, pain_points: list) -> str:
-    """根据情绪点和痛点生成内容钩子"""
-    import random
-
-    # 钩子模板库
-    hook_templates = {
-        '好奇': [
-            f'你真的了解{keyword}吗？',
-            f'{keyword}背后的秘密',
-            f'关于{keyword}的3个冷知识',
-            f'{keyword}的真相可能和你想的不一样'
-        ],
-        '焦虑': [
-            f'不懂{keyword}会吃大亏',
-            f'{keyword}避坑指南',
-            f'别再在{keyword}上浪费时间了',
-            f'这些{keyword}误区90%的人都中招'
-        ],
-        '实用': [
-            f'{keyword}的核心技巧',
-            f'最实用的{keyword}方法',
-            f'{keyword}速成指南',
-            f'掌握{keyword}的关键要点'
-        ],
-        '惊喜': [
-            f'没想到{keyword}还能这样玩',
-            f'{keyword}的神仙操作',
-            f'这个{keyword}技巧绝了',
-            f'{keyword}的高级玩法'
-        ],
-        '共鸣': [
-            f'关于{keyword}，说说我的真实经历',
-            f'{keyword}路上的那些坑',
-            f'我的{keyword}心路历程',
-            f'{keyword}让我明白的道理'
-        ]
-    }
-
-    # 根据主要情绪点选择钩子
-    main_emotion = emotion_triggers[0] if emotion_triggers else '实用'
-
-    # 匹配情绪点
-    for emotion_key in hook_templates.keys():
-        if emotion_key in main_emotion:
-            return random.choice(hook_templates[emotion_key])
-
-    # 根据痛点生成钩子
-    if pain_points:
-        first_pain = pain_points[0]
-        if '不知道' in first_pain or '怎么' in first_pain:
-            return f'解决{keyword}的核心问题'
-        elif '效率' in first_pain or '时间' in first_pain:
-            return f'10分钟掌握{keyword}精髓'
-        elif '错误' in first_pain or '避坑' in first_pain:
-            return f'{keyword}避坑指南'
-
-    # 默认钩子
-    return random.choice(hook_templates['实用'])
-
 def extract_keywords(text: str) -> List[str]:
     """从文本中提取关键词"""
     # 简单实现，实际可以使用 jieba 等分词工具
@@ -351,7 +209,7 @@ def parse_title_candidates(llm_response: str) -> list[str]:
     - 每行一个标题
 
     Returns:
-        最多 3 个标题的列表
+        最多 5 个标题的列表
     """
     import re
 
@@ -362,11 +220,11 @@ def parse_title_candidates(llm_response: str) -> list[str]:
     i = 0
 
     # 匹配 "标题X（类型）：" 或 "标题X："
-    header_re = re.compile(r"^(?:标题\s*)?([1-3一二三])\s*(?:[（(][^）)]*[）)])?\s*[：:]\s*(.*)$")
+    header_re = re.compile(r"^(?:标题\s*)?([1-5一二三四五])\s*(?:[（(][^）)]*[）)])?\s*[：:]\s*(.*)$")
     # 匹配 "1. xxx" 或 "1、xxx"
-    num_re = re.compile(r"^[1-3][\\.、）\)]\s*(.+)$")
+    num_re = re.compile(r"^[1-5][\\.、）\)]\s*(.+)$")
 
-    while i < len(lines) and len(titles) < 3:
+    while i < len(lines) and len(titles) < 5:
         line = lines[i]
 
         # 尝试匹配标题头格式
@@ -395,7 +253,7 @@ def parse_title_candidates(llm_response: str) -> list[str]:
             continue
 
         # 兜底：过滤明显的标签行
-        if not re.match(r"^标题\s*[1-3一二三]\s*(?:[（(][^）)]*[）)])?\s*[：:]?$", line):
+        if not re.match(r"^标题\s*[1-5一二三四五]\s*(?:[（(][^）)]*[）)])?\s*[：:]?$", line):
             titles.append(line)
 
         i += 1
@@ -403,8 +261,8 @@ def parse_title_candidates(llm_response: str) -> list[str]:
     # 清理可能残留的 "标题1（利益型）："
     cleaned = []
     for t in titles:
-        t = re.sub(r"^标题\s*[1-3一二三]\s*(?:[（(][^）)]*[）)])?\s*[：:]?\s*", "", t).strip()
+        t = re.sub(r"^标题\s*[1-5一二三四五]\s*(?:[（(][^）)]*[）)])?\s*[：:]?\s*", "", t).strip()
         if t and t not in cleaned:
             cleaned.append(t)
 
-    return cleaned[:3]
+    return cleaned[:5]
