@@ -167,10 +167,10 @@ playwright install chromium  # 安装浏览器驱动
 2. 配置环境变量（backend\app\core\config.py）
 ```bash
 # LLM 配置
-LLM_PROVIDER=deepseek  # deepseek / qwen / openai
+LLM_PROVIDER=qwen # deepseek / qwen / openai
 LLM_MODEL=deepseek-v4-flash
 LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.deepseek.com
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # 数据库配置
 DATABASE_URL=sqlite:///./xhs_writer.db
