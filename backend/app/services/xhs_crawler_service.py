@@ -22,10 +22,10 @@ from app.core.logger import logger
 
 class XhsCrawlerService:
     """小红书爬虫服务"""
-    
+
     def __init__(self):
         self.crawler = None
-    
+
     async def get_recent_notes_from_db(
         self,
         keywords: List[str],
@@ -38,7 +38,7 @@ class XhsCrawlerService:
     ) -> List[Dict]:
         """
         从数据库中查询近期的相关笔记
-        
+
         Args:
             keywords: 搜索关键词列表
             topic_words: 话题词列表（标题/正文需包含其中之一）
@@ -47,29 +47,29 @@ class XhsCrawlerService:
             min_favorites: 最小收藏数
             days: 查询最近几天的数据
             limit: 返回数量限制
-            
+
         Returns:
             笔记列表
         """
         # 计算时间戳（毫秒）
         cutoff_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-        
+
         async with get_session() as session:
             if not session:
                 return []
-            
+
             # 构建查询条件
             conditions = [
                 XhsNote.last_update_time >= cutoff_time
             ]
-            
+
             # 关键词条件（source_keyword 字段）
             if keywords:
                 keyword_conditions = [
                     XhsNote.source_keyword.like(f"%{kw}%") for kw in keywords
                 ]
                 conditions.append(or_(*keyword_conditions))
-            
+
             # 话题词条件（标题或描述包含）
             if topic_words:
                 topic_conditions = []
@@ -79,7 +79,7 @@ class XhsCrawlerService:
                         XhsNote.desc.like(f"%{word}%")
                     ))
                 conditions.append(or_(*topic_conditions))
-            
+
             # 使用数值字段进行数据库层面的筛选
             if min_comments > 0:
                 conditions.append(XhsNote.comment_count_num >= min_comments)
@@ -87,18 +87,18 @@ class XhsCrawlerService:
                 conditions.append(XhsNote.liked_count_num >= min_likes)
             if min_favorites > 0:
                 conditions.append(XhsNote.collected_count_num >= min_favorites)
-            
+
             # 执行查询
             stmt = select(XhsNote).where(and_(*conditions)).order_by(
                 XhsNote.last_update_time.desc()
             ).limit(limit)
-            
+
             result = await session.execute(stmt)
             notes = result.scalars().all()
-            
+
             # 转换为字典格式
             return [self._note_to_dict(note) for note in notes]
-    
+
     def _note_to_dict(self, note: XhsNote) -> Dict:
         """将数据库模型转换为字典"""
         return {
@@ -119,7 +119,7 @@ class XhsCrawlerService:
             "media_summary": note.media_summary if hasattr(note, 'media_summary') else None,
             "media_analysis_status": note.media_analysis_status if hasattr(note, 'media_analysis_status') else 'pending'
         }
-    
+
     def _parse_count(self, count_str: str) -> int:
         """
         解析互动数字符串，支持中文单位
@@ -127,37 +127,37 @@ class XhsCrawlerService:
         """
         if not count_str:
             return 0
-        
+
         count_str = str(count_str).strip()
-        
+
         try:
             # 处理带"万"的情况
             if '万+' in count_str:
                 num_str = count_str.replace('万+', '').strip()
                 return int(float(num_str) * 10000)
-        
+
             elif '万' in count_str:
                 num_str = count_str.replace('万', '').strip()
                 return int(float(num_str) * 10000)
-            
+
             # 处理带"千"的情况
             elif '千' in count_str:
                 num_str = count_str.replace('千', '').strip()
                 return int(float(num_str) * 1000)
-            
+
             # 处理带"k"或"K"的情况
             elif 'k' in count_str.lower():
                 num_str = count_str.lower().replace('k', '').strip()
                 return int(float(num_str) * 1000)
-            
+
             # 处理纯数字
             else:
                 return int(float(count_str))
-        
+
         except (ValueError, AttributeError):
             # 解析失败返回0
             return 0
-    
+
     async def crawl_notes(
         self,
         keywords: List[str],
@@ -195,7 +195,7 @@ class XhsCrawlerService:
         import config
         from media_platform.xhs import XiaoHongShuCrawler
         from tools import utils
-        
+
         # 设置爬虫配置
         original_save_data_option = config.SAVE_DATA_OPTION
         original_keywords = config.KEYWORDS
@@ -205,7 +205,7 @@ class XhsCrawlerService:
         original_min_likes = getattr(config, 'MIN_LIKES', 0)
         original_min_favorites = getattr(config, 'MIN_FAVORITES', 0)
         original_days = getattr(config, 'DAYS', 0)
-        
+
         try:
             # 更新配置
             config.SAVE_DATA_OPTION = "mysql"
@@ -214,12 +214,12 @@ class XhsCrawlerService:
             config.MIN_COMMENTS = min_comments
             config.MIN_LIKES = min_likes
             config.MIN_FAVORITES = min_favorites
-            config.DAYS = days      
+            config.DAYS = days
             config.CRAWLER_MAX_NOTES_COUNT = target_count
-            
+
             # 记录过滤配置
             utils.logger.info(f"[XhsCrawlerService] Crawler config: keywords={keywords}, topic_words={topic_words}, min_comments={min_comments}, min_likes={min_likes}, min_favorites={min_favorites}, days={days}")
-            
+
             # 初始化数据库
             if config.SAVE_DATA_OPTION == "mysql":
                 from database.db import init_db
@@ -227,24 +227,28 @@ class XhsCrawlerService:
 
             # 创建爬虫实例
             crawler = XiaoHongShuCrawler()
-            
+
             # 记录爬取前的笔记ID集合
             before_note_ids = await self._get_note_ids_in_db(keywords)
-            
+
             # 执行爬取（爬虫内部只对新增笔记计数，会自动翻页直到达到目标数量）
             await crawler.start()
-            
+
             # 清理资源
             await self._cleanup_crawler(crawler)
-            
+
             # 记录爬取后的笔记ID集合
             after_note_ids = await self._get_note_ids_in_db(keywords)
-            
+
             # 计算新增的笔记数量（新ID - 旧ID）
             new_note_ids = after_note_ids - before_note_ids
 
             # 同步分析新增笔记的图片/视频（确保数据完整）
             if new_note_ids:
+                # 先回填 local_media_path 字段（MediaCrawler_XHS 不写这个字段）
+                logger.info(f"🔄 回填 {len(new_note_ids)} 条新笔记的本地媒体路径...")
+                await self._backfill_local_media_paths(list(new_note_ids))
+
                 logger.info(f"🔄 开始分析 {len(new_note_ids)} 条新笔记的图片/视频...")
                 await self._analyze_new_notes_media(list(new_note_ids))
                 logger.info(f"✅ 图片/视频分析完成，数据已保存到数据库")
@@ -261,28 +265,28 @@ class XhsCrawlerService:
             config.MIN_LIKES = original_min_likes
             config.MIN_FAVORITES = original_min_favorites
             config.DAYS = original_days
-    
+
     async def _get_note_ids_in_db(self, keywords: List[str]) -> set:
         """获取数据库中符合关键词的笔记ID集合"""
         async with get_session() as session:
             if not session:
                 return set()
-            
+
             conditions = []
             if keywords:
                 keyword_conditions = [
                     XhsNote.source_keyword.like(f"%{kw}%") for kw in keywords
                 ]
                 conditions.append(or_(*keyword_conditions))
-            
+
             if conditions:
                 stmt = select(XhsNote.note_id).where(and_(*conditions))
             else:
                 stmt = select(XhsNote.note_id)
-            
+
             result = await session.execute(stmt)
             return set(result.scalars().all())
-    
+
     async def _cleanup_crawler(self, crawler):
         """清理爬虫资源"""
         try:
@@ -294,6 +298,101 @@ class XhsCrawlerService:
             error_msg = str(e).lower()
             if "closed" not in error_msg and "disconnected" not in error_msg:
                 print(f"[XhsCrawlerService] Error cleaning up crawler: {e}")
+
+    def _discover_local_media_paths(self, note_id: str) -> Dict:
+        """
+        根据约定的目录结构发现本地媒体文件路径。
+
+        约定路径：
+        - 图片：backend/data/xhs/images/{note_id}/*.jpg|png|webp|...
+        - 视频：backend/data/xhs/videos/{note_id}/*.mp4|mov|...
+
+        Returns:
+            {"images": [path1, path2, ...], "video": path_or_none}
+        """
+        base_dir = Path(__file__).parent.parent.parent / "data" / "xhs"
+        images_dir = base_dir / "images" / note_id
+        videos_dir = base_dir / "videos" / note_id
+
+        result = {"images": [], "video": None}
+
+        # 扫描图片目录
+        if images_dir.exists() and images_dir.is_dir():
+            image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
+            for f in images_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in image_exts:
+                    result["images"].append(str(f.absolute()))
+            result["images"].sort()  # 按文件名排序，保证顺序稳定
+
+        # 扫描视频目录（取第一个视频文件）
+        if videos_dir.exists() and videos_dir.is_dir():
+            video_exts = {'.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv'}
+            for f in videos_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in video_exts:
+                    result["video"] = str(f.absolute())
+                    break  # 只取第一个
+
+        return result
+
+    async def _backfill_local_media_paths(self, note_ids: List[str]) -> int:
+        """
+        回填数据库中笔记的 local_media_path 字段。
+
+        背景：MediaCrawler_XHS 的文件存储与数据库存储是两条独立链路，
+        XhsDbStoreImplement 从未写入 local_media_path 字段，导致始终为 null。
+        本方法在爬虫完成后扫描 backend/data/xhs/ 下的实际文件，
+        把发现的路径以 JSON 格式回填到数据库。
+
+        Args:
+            note_ids: 需要回填的笔记ID列表
+
+        Returns:
+            成功回填的笔记数量
+        """
+        import json
+
+        if not note_ids:
+            return 0
+
+        backfilled = 0
+        try:
+            for note_id in note_ids:
+                discovered = self._discover_local_media_paths(note_id)
+                images = discovered.get("images") or []
+                video = discovered.get("video")
+
+                # 只有发现实际文件才回填
+                if not images and not video:
+                    continue
+
+                payload = {
+                    "images": images,
+                    "video": video,
+                }
+                payload_json = json.dumps(payload, ensure_ascii=False)
+
+                async with get_session() as session:
+                    stmt = select(XhsNote).where(XhsNote.note_id == note_id)
+                    result = await session.execute(stmt)
+                    db_note = result.scalar_one_or_none()
+                    if db_note is None:
+                        continue
+                    db_note.local_media_path = payload_json
+                    await session.commit()
+                    backfilled += 1
+                    logger.debug(
+                        f"📁 回填 local_media_path: note_id={note_id}, "
+                        f"images={len(images)}, video={'yes' if video else 'no'}"
+                    )
+
+            logger.info(
+                f"✅ local_media_path 回填完成: {backfilled}/{len(note_ids)} 条笔记"
+            )
+        except Exception as e:
+            logger.error(f"❌ 回填 local_media_path 失败: {e}")
+
+        return backfilled
+
 
     async def _analyze_new_notes_media(self, note_ids: List[str]):
         """
@@ -321,9 +420,11 @@ class XhsCrawlerService:
                     # 判断是图文还是视频
                     is_video = note.type == 'video' or (note.video_url and note.video_url.strip())
 
-                    # 解析本地文件路径（如果有）
+                    # 解析本地文件路径
                     local_paths = None
                     local_video_path = None
+
+                    # 优先从数据库字段读取
                     if hasattr(note, 'local_media_path') and note.local_media_path:
                         try:
                             local_media = json.loads(note.local_media_path)
@@ -331,6 +432,18 @@ class XhsCrawlerService:
                             local_video_path = local_media.get('video')
                         except:
                             pass
+
+                    # 如果数据库字段为空，按约定路径扫描本地文件
+                    if not local_paths and not local_video_path:
+                        discovered = self._discover_local_media_paths(note.note_id)
+                        local_paths = discovered["images"] if discovered["images"] else None
+                        local_video_path = discovered["video"]
+                        if local_paths or local_video_path:
+                            logger.info(
+                                f"📁 笔记 {note.note_id} 从本地目录发现媒体文件: "
+                                f"图片={len(local_paths) if local_paths else 0}, "
+                                f"视频={'是' if local_video_path else '否'}"
+                            )
 
                     if is_video and note.video_url:
                         # 分析视频（带保底逻辑）
@@ -393,8 +506,8 @@ class XhsCrawlerService:
                         description = await vision_analysis_service.analyze_images_batch_with_fallback(
                             image_urls,
                             local_paths=local_paths,
-                            context=context,
-                            max_images=9
+                            context=context
+                            # max_images 使用配置默认值 settings.VL_MAX_IMAGES
                         )
 
                         # 生成总结

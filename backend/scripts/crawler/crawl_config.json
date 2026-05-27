@@ -4,11 +4,11 @@
       "name": "Python编程相关",
       "keywords": ["Python编程"],
       "topic_words": [],
-      "min_likes": 0,
-      "min_comments": 0,
-      "min_favorites": 0,
+      "min_likes": 10,
+      "min_comments": 10,
+      "min_favorites": 5,
       "days": 90,
-      "count": 4
+      "count": 5
     }
   ]
 }

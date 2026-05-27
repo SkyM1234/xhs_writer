@@ -39,6 +39,9 @@ tenacity>=8.2.2
 aiofiles>=23.2.1
 Pillow>=10.0.0
 
+# 视频处理（用于 VL 视频抽帧分析）
+opencv-python>=4.8.0
+
 # HTML/XML 解析
 parsel>=1.9.0
 

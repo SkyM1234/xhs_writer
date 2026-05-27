@@ -40,5 +40,13 @@ class Settings(BaseSettings):
     IMAGE_SIZE: str = "1024*1024"  # 图片尺寸: 1024*1024, 720*1280, 1280*720
     IMAGE_COUNT: int = 1  # 每次生成图片数量（1-4）
 
+    # 视觉分析配置（Qwen VL）
+    VL_MODEL: str = "qwen-vl-max"  # Qwen VL 模型：qwen-vl-max / qwen-vl-plus
+    VL_MAX_IMAGES: int = 20  # 单次分析最多图片数量（受模型 token 限制）
+
+    # 视频抽帧配置（避免视频 base64 10MB 限制）
+    VL_VIDEO_USE_FRAMES: bool = True  # 是否启用抽帧分析（True：抽帧走多图分析；False：使用原生视频接口）
+    VL_VIDEO_FRAMES: int = 20  # 每个视频抽取的帧数（覆盖关键时刻即可）
+
 # 全局配置实例
 settings = Settings()
