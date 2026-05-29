@@ -24,6 +24,7 @@ class GraphState(TypedDict):
     raw_trends: List[Dict]  # 原始热点数据
     analyzed_templates: List[Dict]  # 分析后的爆款模板
     llm_analysis: Optional[Dict]  # LLM深度分析结果
+    top_references: List[Dict]  # Top-K 爆款原文参考（用于下游 few-shot）
 
     # ===== 内容生产层 =====
     strategy: Optional[Dict]  # 选题策略方案

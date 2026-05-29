@@ -22,8 +22,13 @@ from .nodes import (
 from app.core.logger import logger
 
 
-def should_pass_compliance(state: GraphState) -> Literal["chief_editor", "copywriter"]:
+def should_pass_compliance(state: GraphState) -> Literal["chief_editor", "copywriter", "__end__"]:
     """路由函数：判断合规检查是否通过"""
+    # 如果节点本身已经失败，直接结束工作流
+    if state.get('status') == 'failed':
+        logger.error(f"❌ 合规检查节点失败，工作流终止")
+        return END
+
     compliance_report = state.get('compliance_report', {})
     iteration_count = state.get('iteration_count', 0)
 
@@ -43,8 +48,13 @@ def should_pass_compliance(state: GraphState) -> Literal["chief_editor", "copywr
         return "copywriter"  # 合规不通过，直接重写
 
 
-def should_continue_editing(state: GraphState) -> Literal["copywriter", "human_review", "visual_designer"]:
+def should_continue_editing(state: GraphState) -> Literal["copywriter", "human_review", "visual_designer", "__end__"]:
     """路由函数：判断终审后的流程"""
+    # 如果节点本身已经失败，直接结束工作流
+    if state.get('status') == 'failed':
+        logger.error(f"❌ 终审编辑节点失败，工作流终止")
+        return END
+
     editor_feedback = state.get('editor_feedback', {})
     iteration_count = state.get('iteration_count', 0)
 
@@ -71,8 +81,13 @@ def should_continue_editing(state: GraphState) -> Literal["copywriter", "human_r
         return "copywriter"
 
 
-def should_continue_after_human_review(state: GraphState) -> Literal["copywriter", "visual_designer"]:
+def should_continue_after_human_review(state: GraphState) -> Literal["copywriter", "visual_designer", "__end__"]:
     """路由函数：人工审核后的流程"""
+    # 如果节点本身已经失败，直接结束工作流
+    if state.get('status') == 'failed':
+        logger.error(f"❌ 人工审核节点失败，工作流终止")
+        return END
+
     human_decision = state.get('human_decision')
 
     # 只有在真正有决策时才输出日志，避免在中断前输出误导性日志
@@ -85,6 +100,21 @@ def should_continue_after_human_review(state: GraphState) -> Literal["copywriter
     else:
         # 第一次进入（中断前），human_decision 为 None，不输出日志
         return "copywriter"  # 默认路径（实际不会执行，因为会在 human_review 节点中断）
+
+
+def is_state_failed(state: GraphState) -> bool:
+    """检查 state 是否处于失败状态"""
+    return state.get('status') == 'failed'
+
+
+def route_after_node(next_node: str):
+    """生成统一的'失败短路'路由函数：失败则结束，否则进入指定下一节点"""
+    def _route(state: GraphState) -> str:
+        if is_state_failed(state):
+            logger.error(f"❌ 上一节点失败，工作流终止（原计划进入 {next_node}）")
+            return END
+        return next_node
+    return _route
 
 
 def create_workflow() -> StateGraph:
@@ -117,55 +147,82 @@ def create_workflow() -> StateGraph:
     
     # 设置入口点
     workflow.set_entry_point("trend_collector")
-    
-    # 数据采集流程
-    workflow.add_edge("trend_collector", "trend_analyzer")
-    workflow.add_edge("trend_analyzer", "strategist")
-    
+
+    # 数据采集流程（每条边都增加失败短路：节点失败时直接跳到 END）
+    workflow.add_conditional_edges(
+        "trend_collector",
+        route_after_node("trend_analyzer"),
+        {"trend_analyzer": "trend_analyzer", END: END}
+    )
+    workflow.add_conditional_edges(
+        "trend_analyzer",
+        route_after_node("strategist"),
+        {"strategist": "strategist", END: END}
+    )
+
     # 内容生产流程
-    workflow.add_edge("strategist", "title_lab")
-    workflow.add_edge("title_lab", "copywriter")
+    workflow.add_conditional_edges(
+        "strategist",
+        route_after_node("title_lab"),
+        {"title_lab": "title_lab", END: END}
+    )
+    workflow.add_conditional_edges(
+        "title_lab",
+        route_after_node("copywriter"),
+        {"copywriter": "copywriter", END: END}
+    )
 
     # 文案生成后进入合规检查
-    workflow.add_edge("copywriter", "compliance_checker")
+    workflow.add_conditional_edges(
+        "copywriter",
+        route_after_node("compliance_checker"),
+        {"compliance_checker": "compliance_checker", END: END}
+    )
 
-    # 合规检查后的条件路由
+    # 合规检查后的条件路由（已包含失败短路）
     workflow.add_conditional_edges(
         "compliance_checker",
         should_pass_compliance,
         {
             "chief_editor": "chief_editor",  # 合规通过，进入终审
-            "copywriter": "copywriter"       # 合规不通过，直接重写
+            "copywriter": "copywriter",      # 合规不通过，直接重写
+            END: END                          # 节点失败，结束
         }
     )
 
-    # 终审后的条件路由
+    # 终审后的条件路由（已包含失败短路）
     workflow.add_conditional_edges(
         "chief_editor",
         should_continue_editing,
         {
             "copywriter": "copywriter",          # 80分以下，回到写手重新生成
             "human_review": "human_review",      # 80-90分，进入人工审核
-            "visual_designer": "visual_designer" # 90分以上，直接进入视觉设计
+            "visual_designer": "visual_designer", # 90分以上，直接进入视觉设计
+            END: END                              # 节点失败，结束
         }
     )
 
-    # 人工审核后的条件路由
+    # 人工审核后的条件路由（已包含失败短路）
     workflow.add_conditional_edges(
         "human_review",
         should_continue_after_human_review,
         {
             "copywriter": "copywriter",          # 人工不通过，回到写手
-            "visual_designer": "visual_designer" # 人工通过，进入视觉设计
+            "visual_designer": "visual_designer", # 人工通过，进入视觉设计
+            END: END                              # 节点失败，结束
         }
     )
-    
+
     # 视觉设计完成后进入最终输出
-    workflow.add_edge("visual_designer", "finalize")
-    
+    workflow.add_conditional_edges(
+        "visual_designer",
+        route_after_node("finalize"),
+        {"finalize": "finalize", END: END}
+    )
+
     # 最终输出后结束
     workflow.add_edge("finalize", END)
-    
+
     return workflow
 
 

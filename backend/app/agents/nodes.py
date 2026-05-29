@@ -2,6 +2,7 @@
 LangGraph Agent 节点实现
 """
 from typing import Dict
+from pathlib import Path
 import json
 from .state import GraphState
 from .tools import (
@@ -11,7 +12,10 @@ from .tools import (
     format_content_with_emoji,
     extract_tags,
     calculate_quality_score,
-    parse_title_candidates
+    parse_title_candidates,
+    build_image_prompt_from_json,
+    build_default_titles,
+    download_images_to_outputs,
 )
 from .error_handling import (
     add_error_to_history,
@@ -35,6 +39,37 @@ def _get_task_id(state: GraphState) -> str:
     return None
 
 
+async def _emit_node_failure(task_id: str, node_id: str, node_name: str, error_msg: str):
+    """统一发送节点失败信号，确保前端能将节点标记为 error 状态"""
+    if task_id:
+        await ws_manager.send_node_error(task_id, node_id, node_name, error_msg)
+
+
+async def _emit_node_complete(task_id: str, node_id: str, node_name: str, output: dict = None):
+    """统一发送节点完成信号（适用于成功与降级路径）"""
+    if task_id:
+        await ws_manager.send_node_complete(task_id, node_id, node_name, output or {})
+
+
+async def _emit_node_start(task_id: str, node_id: str, node_name: str):
+    """统一发送节点开始信号"""
+    if task_id:
+        await ws_manager.send_node_start(task_id, node_id, node_name)
+
+
+# 当回退到 copywriter 时需要在前端重置的下游节点
+# 用作常量，避免和前端逻辑漂移
+_NODES_TO_RESET_AFTER_COPYWRITER = [
+    'compliance_checker', 'chief_editor', 'human_review', 'visual_designer', 'finalize'
+]
+
+
+async def _emit_nodes_reset_after_copywriter(task_id: str):
+    """当工作流回退到 copywriter 时，发送下游节点重置消息"""
+    if task_id:
+        await ws_manager.send_nodes_reset(task_id, _NODES_TO_RESET_AFTER_COPYWRITER)
+
+
 # ===== 数据层 Agent =====
 
 async def trend_collector_node(state: GraphState) -> Dict:
@@ -45,7 +80,7 @@ async def trend_collector_node(state: GraphState) -> Dict:
     # 发送节点开始信号
     if task_id:
         logger.debug(f"📤 [trend_collector] 发送 node_start 到 task_id={task_id}")
-        await ws_manager.send_node_start(task_id, "trend_collector", "热点采集")
+        await _emit_node_start(task_id, "trend_collector", "热点采集")
     else:
         logger.warning(f"⚠️ [trend_collector] task_id 为空，无法发送 WebSocket 消息")
 
@@ -53,6 +88,7 @@ async def trend_collector_node(state: GraphState) -> Dict:
         # ===== 数据验证 =====
         keywords = state.get('keywords')
         if not keywords or len(keywords) == 0:
+            await _emit_node_failure(task_id, "trend_collector", "热点采集", '缺少关键词，无法采集数据')
             return {
                 'status': 'failed',
                 'error': '缺少关键词，无法采集数据',
@@ -118,6 +154,7 @@ async def trend_collector_node(state: GraphState) -> Dict:
 
                 if final_count == 0:
                     # 完全没有数据
+                    await _emit_node_failure(task_id, "trend_collector", "热点采集", '数据采集失败：数据库无数据且爬虫失败')
                     return {
                         'status': 'failed',
                         'error': '数据采集失败：数据库无数据且爬虫失败',
@@ -126,9 +163,17 @@ async def trend_collector_node(state: GraphState) -> Dict:
                     }
 
                 messages.append(f'⚠️ 使用现有数据，共 {final_count} 条笔记')
+                # 降级也算"完成"，要发送 node_complete 让前端节点变绿（带降级标记）
+                degraded_titles = [n['title'] for n in all_notes]
+                await _emit_node_complete(task_id, "trend_collector", "热点采集", {
+                    "notes_count": final_count,
+                    "titles": degraded_titles,
+                    "degraded": True
+                })
                 return {
                     'raw_trends': all_notes,
                     'status': 'degraded',
+                    'degraded_nodes': add_degraded_node(state, 'trend_collector'),
                     'messages': messages
                 }
 
@@ -147,6 +192,7 @@ async def trend_collector_node(state: GraphState) -> Dict:
         # 最终结果
         final_count = len(all_notes)
         if final_count == 0:
+            await _emit_node_failure(task_id, "trend_collector", "热点采集", '数据采集失败：未获取到任何笔记')
             return {
                 'status': 'failed',
                 'error': '数据采集失败：未获取到任何笔记',
@@ -162,11 +208,10 @@ async def trend_collector_node(state: GraphState) -> Dict:
         notes_titles = [item['title'] for item in all_notes]
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "trend_collector", "热点采集", {
-                "notes_count": final_count, 
-                "titles": notes_titles
-            })
+        await _emit_node_complete(task_id, "trend_collector", "热点采集", {
+            "notes_count": final_count,
+            "titles": notes_titles
+        })
 
         return {
             'raw_trends': all_notes,
@@ -177,6 +222,8 @@ async def trend_collector_node(state: GraphState) -> Dict:
         # 捕获所有未预期的错误
         error_detail = log_error('trend_collector', e, state)
         error_history = add_error_to_history(state, 'trend_collector', e)
+
+        await _emit_node_failure(task_id, "trend_collector", "热点采集", f'热点采集失败：{str(e)}')
 
         return {
             'status': 'failed',
@@ -192,51 +239,73 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "trend_analyzer", "热点分析")
+    await _emit_node_start(task_id, "trend_analyzer", "热点分析")
 
-    raw_trends = state['raw_trends']
-    keywords = state['keywords']
-
-    if not raw_trends:
-        return {
-            'analyzed_templates': [],
-            'messages': ['⚠️ 没有热点数据可供分析']
-        }
-
-    # 基础数据处理：计算热度评分和提取模式
-    basic_templates = []
-    for item in raw_trends:
-        heat_score = calculate_heat_score(item)
-        title_pattern = extract_title_pattern(item['title'])
-
-        template = {
-            'title': item['title'],
-            'content': item.get('content', ''),
-            'pattern': title_pattern,
-            'heat_score': heat_score,
-            'tags': item['tags'],
-            'engagement': {
-                'likes': item['likes'],
-                'favorites': item['favorites'],
-                'comments': item['comments']
-            }
-        }
-        basic_templates.append(template)
-
-    # 按热度排序，进行深度分析
-    basic_templates.sort(key=lambda x: x['heat_score'], reverse=True)
-    top_notes = basic_templates
-
-    # 使用 LLM 进行深度分析
     try:
-        # 构建分析提示词
-        notes_summary = "\n\n".join([
-            f"【笔记{i+1}】\n标题：{note['title']}\n内容：{note['content']}\n标签：{', '.join(note['tags'])}\n互动数据：👍{note['engagement']['likes']} 💾{note['engagement']['favorites']} 💬{note['engagement']['comments']}"
-            for i, note in enumerate(top_notes)
-        ])
+        raw_trends = state.get('raw_trends') or []
+        keywords = state.get('keywords') or []
 
-        system_prompt = """你是一位资深的小红书内容分析师，擅长从爆款笔记中提取成功模式。
+        if not raw_trends:
+            # 没有数据无法分析，标记为失败让工作流终止
+            await _emit_node_failure(task_id, "trend_analyzer", "热点分析", '没有热点数据可供分析')
+            return {
+                'status': 'failed',
+                'error': '没有热点数据可供分析',
+                'analyzed_templates': [],
+                'messages': ['❌ 热点分析失败：没有热点数据可供分析']
+            }
+
+        # 基础数据处理：计算热度评分和提取模式
+        basic_templates = []
+        for item in raw_trends:
+            heat_score = calculate_heat_score(item)
+            title_pattern = extract_title_pattern(item.get('title', ''))
+
+            template = {
+                'title': item.get('title', ''),
+                'content': item.get('content', ''),
+                'pattern': title_pattern,
+                'heat_score': heat_score,
+                'tags': item.get('tags', []) or [],
+                'engagement': {
+                    'likes': item.get('likes', 0),
+                    'favorites': item.get('favorites', 0),
+                    'comments': item.get('comments', 0)
+                },
+                'media_summary': item.get('media_summary') or '',
+                'media_description': item.get('media_description') or '',
+            }
+            basic_templates.append(template)
+
+        # 按热度排序，进行深度分析
+        basic_templates.sort(key=lambda x: x['heat_score'], reverse=True)
+        top_notes = basic_templates
+        # Top-K 爆款原文参考（供下游 copywriter / title_lab 做 few-shot）
+        top_references = basic_templates[:3]
+
+        # 默认降级用的 llm_analysis
+        default_llm_analysis = {
+            "pain_points": [],
+            "emotion_triggers": [],
+            "hot_tags": [],
+            "visual_patterns": [],
+            "key_insights": "LLM 分析未生效，使用基础分析"
+        }
+
+        # 使用 LLM 进行深度分析
+        try:
+            # 构建分析提示词（包含媒体总结）
+            notes_summary = "\n\n".join([
+                f"【笔记{i+1}】\n"
+                f"标题：{note['title']}\n"
+                f"内容：{note['content']}\n"
+                f"媒体总结：{note.get('media_summary', '无')}\n"
+                f"标签：{', '.join(note['tags'])}\n"
+                f"互动数据：👍{note['engagement']['likes']} 💾{note['engagement']['favorites']} 💬{note['engagement']['comments']}"
+                for i, note in enumerate(top_notes)
+            ])
+
+            system_prompt = """你是一位资深的小红书内容分析师，擅长从爆款笔记中提取成功模式。
 
 你的任务是分析这些高互动笔记，提取出可复用的爆款特征。
 
@@ -244,16 +313,18 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
 1. **话题切入点**：用户关注的痛点、需求、场景
 2. **情绪共鸣点**：引发共鸣的情绪类型（焦虑、好奇、惊喜等）
 3. **标签策略**：高频标签、标签组合模式
+4. **视觉表达模式**：图片/视频的呈现方式、构图风格、视觉元素（基于媒体总结分析）
 
 请以 JSON 格式输出分析结果，格式如下：
 {
   "pain_points": ["时间不够", "效率低下", "不知道怎么开始"],
   "emotion_triggers": ["焦虑", "好奇", "惊喜"],
   "hot_tags": ["干货分享", "实用技巧", "新手必看"],
+  "visual_patterns": ["对比图", "步骤拆解", "实拍场景", "数据可视化"],
   "key_insights": "这批笔记的核心成功要素是..."
 }"""
 
-        user_prompt = f"""关键词：{', '.join(keywords)}
+            user_prompt = f"""关键词：{', '.join(keywords)}
 
 以下是 {len(top_notes)} 篇高互动笔记：
 
@@ -261,65 +332,84 @@ async def trend_analyzer_node(state: GraphState) -> Dict:
 
 请深度分析这些爆款笔记的成功模式。"""
 
-        # 调用 LLM
-        llm_response = await llm_client.chat_with_system(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=0.3,  # 降低温度，提高分析的稳定性
-            max_tokens=2000,
-            model=settings.LLM_MODEL
-        )
+            # 调用 LLM
+            llm_response = await llm_client.chat_with_system(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.3,
+                max_tokens=2000,
+                model=settings.LLM_MODEL
+            )
 
-        # 解析 LLM 返回的 JSON
-        try:
-            # 提取 JSON 部分（可能包含在 markdown 代码块中）
-            import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', llm_response, re.DOTALL)
-            if json_match:
-                llm_analysis = json.loads(json_match.group(1))
-            else:
-                # 尝试直接解析
-                llm_analysis = json.loads(llm_response)
-        except json.JSONDecodeError:
-            # JSON 解析失败，使用基础分析
-            llm_analysis = {
-                "pain_points": [],
-                "emotion_triggers": [],
-                "hot_tags": [],
-                "key_insights": "LLM 分析结果解析失败"
-            }
+            # 解析 LLM 返回的 JSON
+            try:
+                import re
+                json_match = re.search(r'```json\s*(.*?)\s*```', llm_response, re.DOTALL)
+                if json_match:
+                    llm_analysis = json.loads(json_match.group(1))
+                else:
+                    llm_analysis = json.loads(llm_response)
+            except json.JSONDecodeError:
+                # JSON 解析失败，记录降级
+                log_error('trend_analyzer_parse', ValueError('LLM 返回 JSON 解析失败'), state)
+                llm_analysis = dict(default_llm_analysis)
+                llm_analysis['key_insights'] = "LLM 分析结果解析失败"
 
-        # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "trend_analyzer", "热点分析", {
-                "template_count": len(basic_templates), 
-                "key_insights": llm_analysis["key_insights"]
+            # 发送节点完成信号
+            await _emit_node_complete(task_id, "trend_analyzer", "热点分析", {
+                "template_count": len(basic_templates),
+                "key_insights": llm_analysis.get("key_insights", "")
             })
 
-        return {
-            'analyzed_templates': basic_templates,
-            'llm_analysis': llm_analysis,
-            'messages': [
-                f'✅ 热点分析完成，共分析 {len(basic_templates)} 个模板',
-                f'📊 LLM 深度分析：{llm_analysis.get("key_insights", "已完成")[:50]}...'
-            ]
-        }
+            return {
+                'analyzed_templates': basic_templates,
+                'llm_analysis': llm_analysis,
+                'top_references': top_references,
+                'messages': [
+                    f'✅ 热点分析完成，共分析 {len(basic_templates)} 个模板',
+                    f'📊 LLM 深度分析：{llm_analysis.get("key_insights", "已完成")[:50]}...'
+                ]
+            }
+
+        except Exception as e:
+            # LLM 调用失败，降级到基础分析（仍标记为完成，因为有基础模板可用）
+            log_error('trend_analyzer_llm', e, state)
+            error_history = add_error_to_history(state, 'trend_analyzer', e)
+            degraded_nodes = add_degraded_node(state, 'trend_analyzer')
+
+            await _emit_node_complete(task_id, "trend_analyzer", "热点分析", {
+                "template_count": len(basic_templates),
+                "key_insights": "LLM 失败，使用基础分析",
+                "degraded": True
+            })
+
+            return {
+                'analyzed_templates': basic_templates,
+                'llm_analysis': default_llm_analysis,
+                'top_references': top_references,
+                'status': 'degraded',
+                'error_history': error_history,
+                'degraded_nodes': degraded_nodes,
+                'messages': [
+                    f'✅ 热点分析完成（基础模式），提取 {len(basic_templates)} 个模板',
+                    f'⚠️ LLM 分析失败: {str(e)}'
+                ]
+            }
 
     except Exception as e:
-        # LLM 调用失败，降级到基础分析
-        llm_analysis = {
-                "pain_points": [],
-                "emotion_triggers": [],
-                "hot_tags": [],
-                "key_insights": "LLM 分析结果解析失败"
-            }
+        # 顶层兜底：节点本身崩溃
+        error_detail = log_error('trend_analyzer', e, state)
+        error_history = add_error_to_history(state, 'trend_analyzer', e)
+
+        await _emit_node_failure(task_id, "trend_analyzer", "热点分析", f'热点分析失败：{str(e)}')
+
         return {
-            'analyzed_templates': basic_templates,
-            'llm_analysis': llm_analysis,
-            'messages': [
-                f'✅ 热点分析完成（基础模式），提取 {len(basic_templates)} 个模板',
-                f'⚠️ LLM 分析失败: {str(e)}'
-            ]
+            'status': 'failed',
+            'error': f'热点分析失败：{str(e)}',
+            'error_detail': error_detail,
+            'error_history': error_history,
+            'analyzed_templates': [],
+            'messages': [f'❌ 热点分析失败：{str(e)}']
         }
 
 
@@ -330,13 +420,13 @@ async def strategist_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "strategist", "选题策划")
+    await _emit_node_start(task_id, "strategist", "选题策划")
 
     try:
         # ===== 数据验证 =====
         keywords = state.get('keywords')
         if not keywords or len(keywords) == 0:
+            await _emit_node_failure(task_id, "strategist", "选题策划", '缺少关键词，无法制定内容策略')
             return {
                 'status': 'failed',
                 'error': '缺少关键词，无法制定内容策略',
@@ -352,27 +442,28 @@ async def strategist_node(state: GraphState) -> Dict:
         # 从state中获取 LLM 分析结果
         llm_analysis = state.get('llm_analysis', {})
         pain_points = llm_analysis.get('pain_points', [])
-        emotion_triggers = llm_analysis.get('emotion_triggers', ['实用'])
+        emotion_triggers = llm_analysis.get('emotion_triggers', ['实用', '干货', '避坑'])
         key_insights = llm_analysis.get('key_insights', '')
         hot_tags = llm_analysis.get('hot_tags', [])
+        visual_patterns = llm_analysis.get('visual_patterns', [])
 
         # 构建策略
         strategy = {
             'persona': persona,
-            'emotion_point': '；'.join(emotion_triggers) if emotion_triggers else '实用、干货、避坑',
+            'emotion_triggers': emotion_triggers if emotion_triggers else ['实用', '干货', '避坑'],
             'keywords': keywords,
             'keywords_str': keywords_str,
             'pain_points': pain_points if pain_points else [],
             'llm_insights': key_insights if key_insights else '',
-            'hot_tags': hot_tags
+            'hot_tags': hot_tags if hot_tags else [],
+            'visual_patterns': visual_patterns if visual_patterns else []  # 透传视觉模式给下游节点
         }
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "strategist", "选题策划", {
-                "keywords": keywords_str,
-                "llm_insights": key_insights
-            })
+        await _emit_node_complete(task_id, "strategist", "选题策划", {
+            "keywords": keywords_str,
+            "llm_insights": key_insights
+        })
 
         return {
             'strategy': strategy,
@@ -386,6 +477,8 @@ async def strategist_node(state: GraphState) -> Dict:
         # 捕获所有未预期的错误
         error_detail = log_error('strategist', e, state)
         error_history = add_error_to_history(state, 'strategist', e)
+
+        await _emit_node_failure(task_id, "strategist", "选题策划", f'选题策划失败：{str(e)}')
 
         return {
             'status': 'failed',
@@ -401,27 +494,66 @@ async def title_lab_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "title_lab", "标题生成")
-    
-    # 从state中获取 LLM 分析结果
-    keywords = state['keywords']
-    strategy = state['strategy']
+    await _emit_node_start(task_id, "title_lab", "标题生成")
+
+    # ===== 稳健性校验 =====
+    # keywords 是关键依赖：缺失直接 failed，下游无法使用兜底标题
+    keywords = state.get('keywords') or []
+    if not keywords:
+        await _emit_node_failure(task_id, "title_lab", "标题生成", '缺少关键词，无法生成标题')
+        return {
+            'status': 'failed',
+            'error': '缺少关键词，无法生成标题',
+            'messages': ['❌ 标题生成失败：未提供关键词']
+        }
+
+    # strategy 是软依赖：缺失则用最小可用上下文降级
+    strategy = state.get('strategy')
+    strategy_missing = not strategy
+    if strategy_missing:
+        log_error('title_lab_strategy_missing',
+                  ValueError('state.strategy 为空，使用关键词降级生成标题'), state)
+        strategy = {
+            'persona': '专业分享者',
+            'pain_points': [],
+            'llm_insights': '',
+            'hot_tags': [],
+            'keywords_str': '、'.join(keywords),
+        }
 
     # 使用主关键词（第一个）
-    main_keyword = keywords[0] if keywords else "主题"
-    keywords_str = strategy.get('keywords_str', main_keyword)
+    main_keyword = keywords[0]
+    keywords_str = strategy.get('keywords_str') or '、'.join(keywords)
 
     # 从策略中获取信息
-    pain_points = strategy.get('pain_points', [])
-    llm_insights = strategy.get('llm_insights', '')
-    hot_tags = strategy.get('hot_tags', [])
+    pain_points = strategy.get('pain_points', []) or []
+    llm_insights = strategy.get('llm_insights', '') or ''
+    hot_tags = strategy.get('hot_tags', []) or []
 
     try:
         # 构建标题生成提示词
         pain_points_desc = "；".join(pain_points) if pain_points else "效率低、不知道怎么做、容易出错"
         llm_insights_desc = llm_insights if llm_insights else "无"
         hot_tags_desc = "、".join(hot_tags) if hot_tags else "无"
+
+        # ===== 构建 Top-K 爆款标题参考（few-shot） =====
+        top_references = state.get('top_references', [])
+        title_references_section = ""
+        if top_references:
+            ref_titles = []
+            for i, ref in enumerate(top_references, 1):
+                t = ref.get('title', '').strip()
+                if not t:
+                    continue
+                eng = ref.get('engagement', {})
+                ref_titles.append(
+                    f"{i}. {t}（👍{eng.get('likes', 0)} 💾{eng.get('favorites', 0)}）"
+                )
+            if ref_titles:
+                title_references_section = (
+                    "\n\n爆款标题参考（仅学习其结构与情绪钩子，禁止照抄）：\n"
+                    + "\n".join(ref_titles)
+                )
 
         system_prompt = """你是一位小红书爆款标题专家，擅长创作高点击率的标题。
 
@@ -438,6 +570,10 @@ async def title_lab_node(state: GraphState) -> Dict:
 - 包含关键词
 - 体现不同的切入角度或表达方式
 
+⚠️ 爆款参考使用规则：
+- 如果用户消息中包含"爆款标题参考"，仅用于学习其结构、情绪钩子和切入角度
+- **严禁照抄原标题用词或句式**，必须自己创作
+
 输出格式（纯文本，每行一个标题，不要添加编号、类型标签或任何前缀）：
 第一个标题
 第二个标题
@@ -450,7 +586,7 @@ async def title_lab_node(state: GraphState) -> Dict:
 人设角度：{strategy.get('persona', '专业分享者')}
 
 爆款笔记核心洞察：{llm_insights_desc}
-爆款笔记热门标签：{hot_tags_desc}
+爆款笔记热门标签：{hot_tags_desc}{title_references_section}
 
 请生成5个不同角度的小红书标题，每个标题从不同维度切入（如：实用价值、情感共鸣、反常识、故事化等），让用户有多样化的选择。"""
 
@@ -472,21 +608,15 @@ async def title_lab_node(state: GraphState) -> Dict:
             error_history = add_error_to_history(state, 'title_lab', ValueError('标题解析失败'))
             degraded_nodes = add_degraded_node(state, 'title_lab')
 
-            title_candidates = [
-                f'🔥{main_keyword}必看！这些技巧让你少走弯路',
-                f'没想到{main_keyword}还能这样玩？我震惊了',
-                f'关于{main_keyword}，你真的了解吗？',
-                f'{main_keyword}避坑指南！新手必看',
-                f'超实用！{main_keyword}的正确打开方式'
-            ]
+            title_candidates = build_default_titles(main_keyword)
 
             # 发送节点完成信号
-            if task_id:
-                await ws_manager.send_node_complete(task_id, "title_lab", "标题生成", {
-                    "titles": title_candidates
-                })
+            await _emit_node_complete(task_id, "title_lab", "标题生成", {
+                "titles": title_candidates,
+                "degraded": True
+            })
 
-            return {
+            result = {
                 'title_candidates': title_candidates,
                 'status': 'degraded',
                 'error_history': error_history,
@@ -496,14 +626,17 @@ async def title_lab_node(state: GraphState) -> Dict:
                     f'⚠️ LLM 返回标题不足，使用默认标题'
                 ]
             }
+            if strategy_missing:
+                result['strategy'] = strategy
+                result['messages'].append('⚠️ strategy 缺失，已使用关键词兜底策略')
+            return result
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "title_lab", "标题生成", {
-                "titles": title_candidates
-            })
+        await _emit_node_complete(task_id, "title_lab", "标题生成", {
+            "titles": title_candidates
+        })
 
-        return {
+        result = {
             'title_candidates': title_candidates,
             'status': 'waiting_human',
             'messages': [
@@ -515,6 +648,14 @@ async def title_lab_node(state: GraphState) -> Dict:
                 f'📝 标题5: {title_candidates[4][:30]}...'
             ]
         }
+        if strategy_missing:
+            # 把兜底 strategy 写回 state，避免下游 copywriter 再次空读
+            result['strategy'] = strategy
+            result['status'] = 'degraded'
+            result['error_history'] = add_error_to_history(state, 'title_lab', ValueError('strategy 缺失，使用兜底'))
+            result['degraded_nodes'] = add_degraded_node(state, 'title_lab')
+            result['messages'].append('⚠️ strategy 缺失，已使用关键词兜底策略')
+        return result
 
     except Exception as e:
         # LLM 调用失败，使用降级方案（默认标题）
@@ -522,21 +663,15 @@ async def title_lab_node(state: GraphState) -> Dict:
         error_history = add_error_to_history(state, 'title_lab', e)
         degraded_nodes = add_degraded_node(state, 'title_lab')
 
-        title_candidates = [
-            f'🔥{main_keyword}必看！这些技巧让你少走弯路',
-            f'没想到{main_keyword}还能这样玩？我震惊了',
-            f'关于{main_keyword}，你真的了解吗？',
-            f'{main_keyword}避坑指南！新手必看',
-            f'超实用！{main_keyword}的正确打开方式'
-        ]
+        title_candidates = build_default_titles(main_keyword)
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "title_lab", "标题生成", {
-                "titles": title_candidates
-            })
+        await _emit_node_complete(task_id, "title_lab", "标题生成", {
+            "titles": title_candidates,
+            "degraded": True
+        })
 
-        return {
+        result = {
             'title_candidates': title_candidates,
             'status': 'degraded',
             'error_history': error_history,
@@ -546,6 +681,10 @@ async def title_lab_node(state: GraphState) -> Dict:
                 f'⚠️ LLM 生成失败，使用默认标题: {str(e)}'
             ]
         }
+        if strategy_missing:
+            result['strategy'] = strategy
+            result['messages'].append('⚠️ strategy 缺失，已使用关键词兜底策略')
+        return result
 
 
 async def copywriter_node(state: GraphState) -> Dict:
@@ -553,13 +692,13 @@ async def copywriter_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "copywriter", "文案创作")
+    await _emit_node_start(task_id, "copywriter", "文案创作")
 
     try:
         # 验证必需字段
         keywords = state.get('keywords')
         if not keywords or len(keywords) == 0:
+            await _emit_node_failure(task_id, "copywriter", "文案创作", '缺少关键词，无法生成内容')
             return {
                 'status': 'failed',
                 'error': '缺少关键词，无法生成内容',
@@ -568,6 +707,7 @@ async def copywriter_node(state: GraphState) -> Dict:
 
         strategy = state.get('strategy')
         if not strategy:
+            await _emit_node_failure(task_id, "copywriter", "文案创作", '缺少选题策略，无法生成内容')
             return {
                 'status': 'failed',
                 'error': '缺少选题策略，无法生成内容',
@@ -580,6 +720,7 @@ async def copywriter_node(state: GraphState) -> Dict:
             # 尝试使用第一个候选标题
             title_candidates = state.get('title_candidates', [])
             if not title_candidates or len(title_candidates) == 0:
+                await _emit_node_failure(task_id, "copywriter", "文案创作", '未找到可用的标题')
                 return {
                     'status': 'failed',
                     'error': '未找到可用的标题',
@@ -588,7 +729,6 @@ async def copywriter_node(state: GraphState) -> Dict:
             selected_title = title_candidates[0]
 
         # ===== 获取数据 =====
-        templates = state.get('analyzed_templates', [])
         iteration_count = state.get('iteration_count', 0)
 
         # 获取反馈信息
@@ -602,9 +742,10 @@ async def copywriter_node(state: GraphState) -> Dict:
 
         # 从state中获取 LLM 分析结果
         pain_points = strategy.get('pain_points', [])
-        emotion_triggers = strategy.get('emotion_point', '实用、干货')
+        emotion_triggers = strategy.get('emotion_triggers', ['实用', '干货', '避坑'])
 
         pain_points_desc = "\n".join([f"- {p}" for p in pain_points]) if pain_points else "- 不知道怎么开始\n- 容易出错\n- 效率低下"
+        emotion_triggers_desc = "、".join(emotion_triggers) if emotion_triggers else "实用、干货、避坑"
 
         # ===== 使用 RAG 检索写作风格（向量召回 + 自适应 LLM Rerank）=====
         # 检查是否已有缓存的风格检索结果（避免重复检索）
@@ -620,17 +761,17 @@ async def copywriter_node(state: GraphState) -> Dict:
             # 检索最匹配的写作风格
             persona = strategy.get('persona', '专业分享者')
             pain_points_list = pain_points if isinstance(pain_points, list) else []
-            emotion_list = emotion_triggers.split('、') if isinstance(emotion_triggers, str) else []
-
-            # 召回 5 个候选；当 top1/top2 区分度不足（gap < 0.03）时自动触发 LLM rerank
+            emotion_triggers_list = emotion_triggers if isinstance(emotion_triggers, list) else []
+            
+            # 召回 5 个候选；当 top1/top2 区分度不足（gap < 0.05）时自动触发 LLM rerank
             retrieved_styles = await style_retrieval_service.retrieve_style_with_rerank(
                 keywords=keywords,
                 persona=persona,
                 pain_points=pain_points_list,
-                emotion_triggers=emotion_list,
+                emotion_triggers=emotion_triggers_list,
                 top_k=1,
                 recall_k=5,
-                rerank_gap_threshold=0.03,
+                rerank_gap_threshold=0.05,
                 selected_title=selected_title,  # 标题是风格最强信号，参与 query 改写与 rerank
             )
 
@@ -670,6 +811,40 @@ async def copywriter_node(state: GraphState) -> Dict:
 
 文案结构：
 {default_style['structure']}"""
+
+        # ===== 构建 Top-K 爆款原文参考（few-shot） =====
+        top_references = state.get('top_references', [])
+        references_section = ""
+        if top_references:
+            ref_blocks = []
+            for i, ref in enumerate(top_references, 1):
+                ref_title = ref.get('title', '')
+                ref_content = (ref.get('content') or '').strip()
+                # 控制单篇截断，避免 token 过多
+                if len(ref_content) > 300:
+                    ref_content = ref_content[:300] + '...'
+                ref_media = (ref.get('media_summary') or '').strip()
+                if len(ref_media) > 100:
+                    ref_media = ref_media[:100] + '...'
+                eng = ref.get('engagement', {})
+
+                block_lines = [
+                    f"【爆款参考{i}】",
+                    f"标题：{ref_title}",
+                    f"正文节选：{ref_content}",
+                ]
+                if ref_media:
+                    block_lines.append(f"媒体表达：{ref_media}")
+                block_lines.append(
+                    f"互动数据：👍{eng.get('likes', 0)} 💾{eng.get('favorites', 0)} 💬{eng.get('comments', 0)}"
+                )
+                ref_blocks.append("\n".join(block_lines))
+
+            references_section = (
+                "\n\n以下是该主题下的爆款笔记参考，用于学习它们的写作风格、叙事节奏和情绪表达：\n\n"
+                + "\n\n".join(ref_blocks)
+                + "\n\n⚠️ 重要：仅参考其表达感觉与节奏，不要直接照抄原文用词或结构。"
+            )
 
         # 构建反馈信息（如果是重新生成）
         feedback_section = ""
@@ -728,18 +903,23 @@ async def copywriter_node(state: GraphState) -> Dict:
 - **聚焦方法论**：直接分享干货、技巧、步骤，不需要通过他人故事来包装
 - **可验证性**：内容应基于可验证的事实、方法、现象，而非虚构的个人故事
 
+⚠️ 爆款参考使用规则（重要）：
+- 如果用户消息中包含"爆款参考"，仅用于学习其写作风格、叙事节奏、情绪表达
+- **严禁照抄原文用词、句式或结构**，必须用自己的表达重新创作
+- 提取参考笔记的"感觉"（语气、切入点、节奏），而不是"内容"
+
 请写一篇自然流畅的小红书内容。"""
 
         user_prompt = f"""标题：{selected_title}
 
 关键词：{keywords_str}
 人设角度：{strategy.get('persona', '专业分享者')}
-情绪点：{emotion_triggers}
+情绪点：{emotion_triggers_desc}
 
 用户痛点：
 {pain_points_desc}
 
-{style_guidance}{feedback_section}
+{style_guidance}{references_section}{feedback_section}
 
 请生成一篇小红书内容（包含正文、标签）。"""
 
@@ -764,12 +944,11 @@ async def copywriter_node(state: GraphState) -> Dict:
         draft_content = format_content_with_emoji(draft_content)
 
         # 发送节点完成信号（包含完整的 draft_content）
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "copywriter", "文案创作", {
-                "content_length": len(draft_content),
-                "title": selected_title,
-                "draft_content": draft_content  # 添加完整内容
-            })
+        await _emit_node_complete(task_id, "copywriter", "文案创作", {
+            "content_length": len(draft_content),
+            "title": selected_title,
+            "draft_content": draft_content  # 添加完整内容
+        })
 
         return {
             'draft_content': draft_content,
@@ -788,6 +967,8 @@ async def copywriter_node(state: GraphState) -> Dict:
         error_detail = log_error('copywriter', e, state)
         error_history = add_error_to_history(state, 'copywriter', e)
 
+        await _emit_node_failure(task_id, "copywriter", "文案创作", f'文案生成失败：{str(e)}')
+
         return {
             'status': 'failed',
             'error': f'文案生成失败：{str(e)}',
@@ -802,13 +983,13 @@ async def visual_designer_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "visual_designer", "视觉设计")
+    await _emit_node_start(task_id, "visual_designer", "视觉设计")
 
     try:
         # ===== 数据验证 =====
         keywords = state.get('keywords')
         if not keywords or len(keywords) == 0:
+            await _emit_node_failure(task_id, "visual_designer", "视觉设计", '缺少关键词，无法生成图片')
             return {
                 'status': 'failed',
                 'error': '缺少关键词，无法生成图片',
@@ -817,83 +998,146 @@ async def visual_designer_node(state: GraphState) -> Dict:
 
         title = state.get('selected_title', '')
         draft_content = state.get('draft_content', '')
+        strategy = state.get('strategy', {})
+        visual_patterns = strategy.get('visual_patterns', [])
 
         # 使用主关键词（第一个）
         keywords_str = "、".join(keywords)
 
-        # ===== 第一步：使用 LLM 生成优化的图片提示词 =====
-        system_prompt = """你是一位专业的小红书视觉设计师，擅长为不同主题内容生成多样化、高质感的配图提示词。
+        # ===== 第一步：使用 LLM 生成结构化的图片提示词 =====
+        # 通过结构化 JSON 输出强制 LLM 给出具体可视化的细节，避免泛泛的形容词
+        system_prompt = """你是一位专业的小红书视觉设计师。你的任务是为给定的笔记内容生成一份**结构化、可落地**的图片描述。
 
-核心原则：
-1. **深度理解内容主题**：仔细分析标题和内容，提取核心场景和情感
-2. **场景多样化**：根据主题选择最合适的场景类型
-   - 学习类：图书馆、自习室、笔记特写、知识图谱等
-   - 生活类：居家场景、户外风景、物品特写等
-   - 情感类：自然风光、抽象意境、色彩氛围等
-   - 美食类：食物特写、餐桌布置、烹饪场景等
-   - 旅行类：风景、建筑、街景等
-3. **视觉风格灵活选择**：根据内容主题和情感选择最合适的风格
-   - 插画风格：适合教程、指南类内容，简洁清晰
-   - 扁平化设计：适合概念、流程类内容，现代简约
-   - 水彩风格：适合情感、生活类内容，柔和温暖
-   - 简约风格：适合专业、严肃类内容，干净利落
-   - 半写实风格：适合美食、旅行类内容，真实感强
-4. **色彩情感化**：根据内容情感选择合适的色调
-   - 温暖色调（米色、浅橙、暖黄）：温馨、治愈、舒适
-   - 冷静色调（浅蓝、薄荷绿、灰白）：专业、理性、清爽
-   - 清新色调（嫩绿、天蓝、乳白）：活力、自然、轻松
-   - 沉稳色调（深蓝、墨绿、棕灰）：成熟、可靠、高级
-5. **色彩饱和度控制**：避免过度鲜艳，使用柔和自然的色彩，饱和度适中
+核心要求：
+1. **从正文中提取具体物体**：必须从正文里找出 3-6 个可以画出来的具体物品/场景，不要用宽泛的概念词（如"学习用品"、"美食"、"生活方式"）
+2. **场景细节具体化**：写清楚"什么物品 + 怎么摆放 + 在什么环境里"，不要写"一个 XX 的场景"
+3. **风格必须从下方非写实白名单中选择一个**（详见"弱模型适配规则"）
+4. **色彩用具体色名**：写明 3-5 个具体颜色名称（中文+色名），不要写"温暖色调"这种模糊描述
+5. **光线要写清来源、方向、色温**：哪个方向射来 / 是直射还是漫反射 / 暖色还是冷色
+6. **构图必须简单化**：避免复杂透视
 
-输出要求：
-直接输出一句完整的图片描述，包含：画面主体、场景环境、视觉风格、色彩氛围、光线效果、构图方式。
-不要添加任何解释或前缀。
-"""
+⚠️ 严禁使用以下空话：高质量、精致、温馨、治愈、氛围感、有质感、唯美、文艺、小清新（这些词无法转化为具体画面）
 
-        user_prompt = f"""请为以下小红书内容生成配图提示词：
+⚠️ 严禁套用任何固定题材：你必须紧扣【正文】里出现的物品和场景来构造画面。如果正文讲的是健身就画健身相关物品，讲护肤就画护肤相关物品，以此类推。
+
+⚠️ **弱模型适配规则（最重要！）**：
+当前生图模型能力有限，对真实场景容易出 bug（畸形手指、伪文字、扭曲人脸、复杂透视错乱）。请严格遵守以下规则：
+
+【风格白名单】style 字段必须从下列**非写实风格**中选择一个：
+- 扁平化矢量插画（flat illustration）
+- 简约线条插画（minimal line art）
+- 水彩手绘（watercolor）
+- 童趣手绘风（hand-drawn cute）
+- 国风工笔/水墨（Chinese ink wash）
+- 像素风（pixel art）
+- 几何抽象（geometric abstract）
+- 拼贴艺术（collage art）
+
+【style 字段禁用项】严禁出现：摄影、半写实、写实、photorealistic、4K、电影感、cinematic、超写实、HDR
+
+【主体规则】
+- subject 必须是**物品 / 抽象图形 / 风景**，**严禁画人**（包括：人物、人脸、肖像、人体、半身像、剪影、背影）
+- 严禁画**动物特写、宠物**（毛发难以处理）
+- 严禁出现**手部、手指**的特写或近景
+- 严禁画**文字、汉字、英文、招牌、书页文字、logo**
+
+【构图规则】
+- 严禁要求复杂透视（建筑透视、街景透视、深景纵深）
+- 严禁多人物互动场景、人群场景
+- 主体保持单一或少量（≤3 个主体）
+
+【色彩规则】
+- color_palette 用 3-5 个低饱和度色块（莫兰迪色系优先）
+- 严禁要求复杂渐变、玻璃反射、镜面反射、液体反光
+
+输出格式：严格按以下 JSON 输出。每个字段必须紧扣正文具体内容，**禁止照抄下方占位符里的任何词语**：
+```json
+{
+  "subject": "<画面核心主体的描述：必须是物品/抽象图形/风景，严禁画人或动物，写明物体的形态、状态、相对位置>",
+  "scene": "<场景环境的具体描述：包括位置、周围物品、桌面/地面/背景的材质和颜色，避免复杂透视>",
+  "composition": "<构图方式 + 主体在画面中的位置 + 留白比例>",
+  "lighting": "<光线来源（自然光/灯光）+ 方向 + 强度（直射/漫反射）+ 色温（冷/暖/中性），优先柔和漫反射>",
+  "color_palette": "<3-5 个具体颜色名称（建议莫兰迪色系），用顿号分隔，低饱和度>",
+  "style": "<必须从非写实风格白名单中选择一个，并简要说明视觉调性>",
+  "mood": "<1-3 个情绪关键词，紧扣正文情感>",
+  "texture_details": "<画面中重点物体的材质与质感细节，避免玻璃/镜面/液体反射>"
+}
+```
+
+不要添加任何解释或前缀，直接输出 JSON。"""
+
+        # 构建爆款视觉模式参考（如果有）
+        visual_pattern_hint = ""
+        if visual_patterns:
+            visual_pattern_hint = (
+                f"\n【爆款视觉模式参考】{', '.join(visual_patterns)}"
+                f"\n请在 style 或 composition 字段中体现上述模式（但不要照搬）。"
+            )
+
+        user_prompt = f"""请为以下小红书笔记生成配图描述：
 
 【标题】{title}
 
-【内容】{draft_content[:800]}{'...' if len(draft_content) > 800 else ''}
+【正文】{draft_content[:800]}{'...' if len(draft_content) > 800 else ''}
 
-
-【关键词】{keywords_str}
+【关键词】{keywords_str}{visual_pattern_hint}
 
 要求：
-1. 根据内容主题和情感，自主选择最合适的视觉风格（插画、扁平化、水彩、简约、半写实等）
-2. 深入理解内容主题，选择最贴合的场景类型
-3. 画面要与内容主题强相关，能直观传达核心信息
-4. 色彩柔和自然，饱和度适中，避免过度鲜艳
-5. 根据内容情感选择合适的色调（温暖、冷静、清新、沉稳等）
-6. 避免文字、人脸、品牌logo等敏感元素
-7. 适合作为小红书封面图使用
+1. **subject 和 scene 必须使用正文里实际出现的物品/场景**，不要凭空想象题材
+2. 八个字段全部填充，每个字段都要具体到能让画师/AI直接动手画
+3. 避免文字、人脸、品牌logo等元素
+4. 色彩柔和自然，饱和度适中
 
-直接输出图片提示词："""
+直接输出 JSON："""
 
         # 调用 LLM 生成提示词
         llm_response = await llm_client.chat_with_system(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            temperature=0.8,  # 提高创造性
-            max_tokens=1000,
+            temperature=0.85,  # 略高，鼓励具体细节的多样性
+            max_tokens=1500,
             model=settings.LLM_MODEL,
         )
 
-        # 清理提示词
-        optimized_prompt = llm_response.strip().strip('"').strip("'")
+        # ===== 解析 JSON 并拼装提示词 =====
+        optimized_prompt = build_image_prompt_from_json(llm_response)
 
-        # 负面提示词（避免不想要的元素）
-        negative_prompt = "文字，水印，logo，人脸，低质量，模糊，噪点，变形，过度饱和，过度鲜艳"
+        # 负面提示词（弱模型适配：堆叠所有易翻车元素）
+        negative_prompt = (
+            # 人物相关（弱模型最易翻车）
+            "人, 人物, 人脸, 肖像, 人体, 半身像, 全身, 剪影, 背影, "
+            "眼睛, 嘴巴, 鼻子, 牙齿, 表情, "
+            "手, 手指, 手部特写, 脚, 脚趾, 四肢, "
+            # 动物相关
+            "动物, 宠物, 毛发, 皮毛, 羽毛, 动物面部, "
+            # 文字相关
+            "文字, 汉字, 中文, 英文, 字母, 数字, 招牌, 书页文字, 标题文字, "
+            "水印, 标志, logo, 品牌标识, 印章, 二维码, "
+            # 反射/液体（光影易混乱）
+            "玻璃反射, 镜面, 镜子, 镜像, 水面倒影, 液体反光, 水珠, "
+            # 复杂场景（透视易错）
+            "复杂建筑, 街景透视, 城市鸟瞰, 复杂机械, 齿轮, 电路, "
+            "人群, 多人物, 拥挤场景, "
+            # 真实感关键词（强行拉回到风格化）
+            "photorealistic, 超写实, 写实摄影, photography, realistic, "
+            "4K, 8K, HDR, 电影感, cinematic, 真实质感, 真实皮肤, "
+            # 通用质量缺陷
+            "低质量, 模糊, 噪点, 颗粒感, 失焦, "
+            "变形, 畸形, 多余肢体, 比例错误, 解剖错误, "
+            "过度饱和, 过度鲜艳, 颜色失真, 色带, 色偏"
+        )
 
 
         # ===== 第二步：调用图片生成 API =====
         from app.services.image_generation_service import image_generation_service
-        from app.utils.image_downloader import image_downloader
-        from pathlib import Path
 
         try:
-            # 构建完整的提示词，强调质量和自然感
-            full_prompt = f"{optimized_prompt}, 高质量, 精致细节, 柔和色彩, 自然光线, 构图优美, 小红书风格"
+            # 弱模型适配：在末尾追加强风格化锚点，把整体推离写实区间
+            # 这些 token 被生图模型识别为"非真实图像"信号，能稳定避免畸形手指/伪文字等问题
+            full_prompt = (
+                f"{optimized_prompt}；"
+                "整体小红书风格，画面干净不杂乱，扁平插画质感，无文字，无人物，低饱和度配色"
+            )
 
             image_urls = await image_generation_service.generate_image(
                 prompt=full_prompt,
@@ -903,38 +1147,13 @@ async def visual_designer_node(state: GraphState) -> Dict:
             )
 
             # ===== 第三步：下载图片到目标目录 =====
-            local_paths = []
-            if image_urls:
-                try:
-                    # 创建目标目录：data/outputs/{关键词}_{task_id}/images/
-                    main_keyword = keywords[0] if keywords else "content"
-                    output_dir = Path(__file__).parent.parent.parent / "data" / "outputs" / f"{main_keyword}_{task_id}"
-                    images_dir = output_dir / "images"
-                    images_dir.mkdir(parents=True, exist_ok=True)
-
-                    # 生成文件名前缀（使用第一个关键词）
-                    prefix = keywords[0] if keywords else "image"
-                    # 批量下载图片到目标目录
-                    local_paths = await image_downloader.download_images(
-                        image_urls,
-                        prefix=prefix,
-                        target_dir=str(images_dir)
-                    )
-
-                    if local_paths:
-                        logger.info(f"✅ 图片已下载到: {images_dir}, 共 {len(local_paths)} 张")
-                    else:
-                        logger.warning(f"⚠️ 图片下载失败，但保留了在线 URL")
-                except Exception as download_error:
-                    logger.warning(f"⚠️ 图片下载失败: {download_error}")
-                    # 下载失败不影响整体流程，继续使用在线 URL
+            local_paths = await download_images_to_outputs(image_urls, keywords, task_id)
 
             # 发送节点完成信号
-            if task_id:
-                await ws_manager.send_node_complete(task_id, "visual_designer", "视觉设计", {
-                    "image_prompt": optimized_prompt,
-                    "image_count": len(image_urls)
-                })
+            await _emit_node_complete(task_id, "visual_designer", "视觉设计", {
+                "image_prompt": optimized_prompt,
+                "image_count": len(image_urls)
+            })
 
             return {
                 'image_prompts': [optimized_prompt],
@@ -948,12 +1167,24 @@ async def visual_designer_node(state: GraphState) -> Dict:
             }
 
         except Exception as img_error:
-            # 图片生成失败，但提示词生成成功
+            # 图片生成失败，但提示词生成成功 → 降级（图片是非关键资产，可没有图）
             logger.warning(f"⚠️ 图片生成失败: {img_error}")
+            error_history = add_error_to_history(state, 'visual_designer', img_error)
+            degraded_nodes = add_degraded_node(state, 'visual_designer')
+
+            await _emit_node_complete(task_id, "visual_designer", "视觉设计", {
+                "image_prompt": optimized_prompt,
+                "image_count": 0,
+                "degraded": True
+            })
+
             return {
                 'image_prompts': [optimized_prompt],
                 'image_urls': [],
                 'image_local_paths': [],
+                'status': 'degraded',
+                'error_history': error_history,
+                'degraded_nodes': degraded_nodes,
                 'messages': [
                     f'✅ 图片提示词生成完成',
                     f'⚠️ 图片生成失败: {str(img_error)}',
@@ -962,11 +1193,9 @@ async def visual_designer_node(state: GraphState) -> Dict:
             }
 
     except Exception as e:
-        # 捕获所有未预期的错误
+        # 顶层异常：提示词构建/调用失败，使用默认提示词降级
         log_error('visual_designer', e, state)
         error_history = add_error_to_history(state, 'visual_designer', e)
-
-        # 使用降级方案（默认提示词）
         degraded_nodes = add_degraded_node(state, 'visual_designer')
 
         # 尝试使用默认提示词生成图片
@@ -974,8 +1203,6 @@ async def visual_designer_node(state: GraphState) -> Dict:
 
         try:
             from app.services.image_generation_service import image_generation_service
-            from app.utils.image_downloader import image_downloader
-            from pathlib import Path
 
             image_urls = await image_generation_service.generate_image(
                 prompt=default_prompt,
@@ -983,24 +1210,14 @@ async def visual_designer_node(state: GraphState) -> Dict:
                 n=1
             )
 
-            # 下载图片到目标目录
-            local_paths = []
-            if image_urls:
-                try:
-                    # 创建目标目录
-                    main_keyword = keywords[0] if keywords else "content"
-                    output_dir = Path(__file__).parent.parent.parent / "data" / "outputs" / f"{main_keyword}_{task_id}"
-                    images_dir = output_dir / "images"
-                    images_dir.mkdir(parents=True, exist_ok=True)
-
-                    prefix = keywords[0] if keywords else "image"
-                    local_paths = await image_downloader.download_images(
-                        image_urls,
-                        prefix=prefix,
-                        target_dir=str(images_dir)
-                    )
-                except Exception as download_error:
-                    logger.warning(f"⚠️ 图片下载失败: {download_error}")
+            # 下载图片到目标目录（失败自动返回空列表）
+            local_paths = await download_images_to_outputs(image_urls, keywords, task_id)
+            
+            await _emit_node_complete(task_id, "visual_designer", "视觉设计", {
+                "image_prompt": default_prompt,
+                "image_count": len(image_urls),
+                "degraded": True
+            })
 
             return {
                 'image_prompts': [default_prompt],
@@ -1016,7 +1233,16 @@ async def visual_designer_node(state: GraphState) -> Dict:
                 ]
             }
         except Exception as fallback_error:
-            # 完全失败
+            # 完全失败：提示词和图片都没有，但视觉是非关键路径，仍降级前进，让 finalize 处理空图
+            log_error('visual_designer_fallback', fallback_error, state)
+            error_history = add_error_to_history(state, 'visual_designer', fallback_error)
+
+            await _emit_node_complete(task_id, "visual_designer", "视觉设计", {
+                "image_prompt": default_prompt,
+                "image_count": 0,
+                "degraded": True
+            })
+
             return {
                 'image_prompts': [default_prompt],
                 'image_urls': [],
@@ -1039,13 +1265,13 @@ async def compliance_checker_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "compliance_checker", "合规检查")
+    await _emit_node_start(task_id, "compliance_checker", "合规检查")
 
     try:
         # ===== 数据验证 =====
         draft_content = state.get('draft_content')
         if not draft_content:
+            await _emit_node_failure(task_id, "compliance_checker", "合规检查", '缺少草稿内容，无法进行合规检查')
             return {
                 'status': 'failed',
                 'error': '缺少草稿内容，无法进行合规检查',
@@ -1077,15 +1303,13 @@ async def compliance_checker_node(state: GraphState) -> Dict:
             compliance_report['suggestions'].append('请移除敏感词后重新生成')
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "compliance_checker", "合规检查", {
-                "passed": compliance_report['passed']
-            })
+        await _emit_node_complete(task_id, "compliance_checker", "合规检查", {
+            "passed": compliance_report['passed']
+        })
 
-            # 如果合规不通过，发送节点重置消息（将回退到文案创作）
-            if not compliance_report['passed']:
-                nodes_to_reset = ['compliance_checker', 'chief_editor', 'human_review', 'visual_designer', 'finalize']
-                await ws_manager.send_nodes_reset(task_id, nodes_to_reset)
+        # 如果合规不通过，发送节点重置消息（将回退到文案创作）
+        if not compliance_report['passed']:
+            await _emit_nodes_reset_after_copywriter(task_id)
 
         return {
             'compliance_report': compliance_report,
@@ -1098,8 +1322,13 @@ async def compliance_checker_node(state: GraphState) -> Dict:
         log_error('compliance_checker', e, state)
         error_history = add_error_to_history(state, 'compliance_checker', e)
 
-        # 合规检查失败，使用降级方案（跳过检查但警告）
+        # 合规检查失败，使用降级方案（跳过检查但警告），仍发 node_complete 让前端节点变绿
         degraded_nodes = add_degraded_node(state, 'compliance_checker')
+
+        await _emit_node_complete(task_id, "compliance_checker", "合规检查", {
+            "passed": True,
+            "degraded": True
+        })
 
         return {
             'compliance_report': {
@@ -1125,13 +1354,13 @@ async def chief_editor_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "chief_editor", "终审编辑")
+    await _emit_node_start(task_id, "chief_editor", "终审编辑")
 
     try:
         # ===== 数据验证 =====
         draft_content = state.get('draft_content')
         if not draft_content:
+            await _emit_node_failure(task_id, "chief_editor", "终审编辑", '缺少草稿内容，无法进行终审')
             return {
                 'status': 'failed',
                 'error': '缺少草稿内容，无法进行终审',
@@ -1140,6 +1369,7 @@ async def chief_editor_node(state: GraphState) -> Dict:
 
         compliance_report = state.get('compliance_report')
         if not compliance_report:
+            await _emit_node_failure(task_id, "chief_editor", "终审编辑", '缺少合规检查报告，无法进行终审')
             return {
                 'status': 'failed',
                 'error': '缺少合规检查报告，无法进行终审',
@@ -1281,17 +1511,15 @@ async def chief_editor_node(state: GraphState) -> Dict:
             new_status = 'review_failed'  # 80分以下继续修改
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "chief_editor", "终审编辑", {
-                "score": quality_score,
-                "status": new_status,
-                "title": title  # 添加标题字段，供前端显示
-            })
+        await _emit_node_complete(task_id, "chief_editor", "终审编辑", {
+            "score": quality_score,
+            "status": new_status,
+            "title": title  # 添加标题字段，供前端显示
+        })
 
-            # 如果评分不通过，发送节点重置消息（回退到文案创作）
-            if new_status == 'review_failed':
-                nodes_to_reset = ['compliance_checker', 'chief_editor', 'human_review', 'visual_designer', 'finalize']
-                await ws_manager.send_nodes_reset(task_id, nodes_to_reset)
+        # 如果评分不通过，发送节点重置消息（回退到文案创作）
+        if new_status == 'review_failed':
+            await _emit_nodes_reset_after_copywriter(task_id)
 
         return {
             'editor_feedback': feedback,  # 改为直接存储字典，方便路由函数使用
@@ -1304,6 +1532,8 @@ async def chief_editor_node(state: GraphState) -> Dict:
         # 捕获所有未预期的错误
         error_detail = log_error('chief_editor', e, state)
         error_history = add_error_to_history(state, 'chief_editor', e)
+
+        await _emit_node_failure(task_id, "chief_editor", "终审编辑", f'终审评估失败：{str(e)}')
 
         return {
             'status': 'failed',
@@ -1324,13 +1554,13 @@ async def human_review_node(state: GraphState) -> Dict:
 
     task_id = _get_task_id(state)
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "human_review", "人工审核")
+    await _emit_node_start(task_id, "human_review", "人工审核")
 
     try:
         # ===== 数据验证 =====
         editor_feedback = state.get('editor_feedback', {})
         if not editor_feedback:
+            await _emit_node_failure(task_id, "human_review", "人工审核", '缺少编辑反馈，无法进行人工审核')
             return {
                 'status': 'failed',
                 'error': '缺少编辑反馈，无法进行人工审核',
@@ -1344,12 +1574,11 @@ async def human_review_node(state: GraphState) -> Dict:
         human_decision = state.get('human_decision')
 
         # 发送节点完成信号
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "human_review", "人工审核", {
-                "score": score,
-                "status": "waiting_human_review" if not human_decision else "human_reviewed",
-                "title": title  # 添加标题字段
-            })
+        await _emit_node_complete(task_id, "human_review", "人工审核", {
+            "score": score,
+            "status": "waiting_human_review" if not human_decision else "human_reviewed",
+            "title": title  # 添加标题字段
+        })
 
         if not human_decision:
             # 第一次进入此节点，返回等待状态
@@ -1372,6 +1601,8 @@ async def human_review_node(state: GraphState) -> Dict:
         error_detail = log_error('human_review', e, state)
         error_history = add_error_to_history(state, 'human_review', e)
 
+        await _emit_node_failure(task_id, "human_review", "人工审核", f'人工审核节点失败：{str(e)}')
+
         return {
             'status': 'failed',
             'error': f'人工审核节点失败：{str(e)}',
@@ -1386,13 +1617,13 @@ async def finalize_node(state: GraphState) -> Dict:
     task_id = _get_task_id(state)
 
     # 发送节点开始信号
-    if task_id:
-        await ws_manager.send_node_start(task_id, "finalize", "最终输出")
+    await _emit_node_start(task_id, "finalize", "最终输出")
 
     try:
         # ===== 数据验证 =====
         draft_content = state.get('draft_content')
         if not draft_content:
+            await _emit_node_failure(task_id, "finalize", "最终输出", '缺少草稿内容，无法生成最终输出')
             return {
                 'status': 'failed',
                 'error': '缺少草稿内容，无法生成最终输出',
@@ -1401,6 +1632,7 @@ async def finalize_node(state: GraphState) -> Dict:
 
         selected_title = state.get('selected_title')
         if not selected_title:
+            await _emit_node_failure(task_id, "finalize", "最终输出", '缺少标题，无法生成最终输出')
             return {
                 'status': 'failed',
                 'error': '缺少标题，无法生成最终输出',
@@ -1409,6 +1641,7 @@ async def finalize_node(state: GraphState) -> Dict:
 
         keywords = state.get('keywords')
         if not keywords:
+            await _emit_node_failure(task_id, "finalize", "最终输出", '缺少关键词，无法生成最终输出')
             return {
                 'status': 'failed',
                 'error': '缺少关键词，无法生成最终输出',
@@ -1432,8 +1665,6 @@ async def finalize_node(state: GraphState) -> Dict:
 
         # ===== 保存笔记到文件系统 =====
         try:
-            from pathlib import Path
-            import json
             from datetime import datetime
 
             # 创建保存目录：data/outputs/{关键词}_{task_id}/
@@ -1481,15 +1712,14 @@ async def finalize_node(state: GraphState) -> Dict:
         # 优先使用在线 URL（直接可访问），本地路径作为备选
         display_images = final_post['image_urls'] if final_post['image_urls'] else local_image_urls
 
-        if task_id:
-            await ws_manager.send_node_complete(task_id, "finalize", "最终输出", {
-                "title": final_post['title'],
-                "content": final_post['content'],
-                "tags": final_post['tags'],
-                "images": display_images,
-                "local_images": local_image_urls,
-                "saved_path": final_post.get('saved_path', '')
-            })
+        await _emit_node_complete(task_id, "finalize", "最终输出", {
+            "title": final_post['title'],
+            "content": final_post['content'],
+            "tags": final_post['tags'],
+            "images": display_images,
+            "local_images": local_image_urls,
+            "saved_path": final_post.get('saved_path', '')
+        })
 
         return {
             'final_post': final_post,
@@ -1504,6 +1734,8 @@ async def finalize_node(state: GraphState) -> Dict:
         # 捕获所有未预期的错误
         error_detail = log_error('finalize', e, state)
         error_history = add_error_to_history(state, 'finalize', e)
+
+        await _emit_node_failure(task_id, "finalize", "最终输出", f'最终输出失败：{str(e)}')
 
         return {
             'status': 'failed',

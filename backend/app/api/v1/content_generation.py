@@ -372,11 +372,10 @@ async def human_review(request: HumanReviewRequest):
 
         # 如果是 reject，发送节点重置消息（在 update_state 之后，ainvoke 之前）
         if request.decision == 'reject':
-            from app.core.websocket_manager import ws_manager
-            # 重置后续节点：合规检查、终审编辑、人工审核、视觉设计、最终输出
-            nodes_to_reset = ['compliance_checker', 'chief_editor', 'human_review', 'visual_designer', 'finalize']
-            await ws_manager.send_nodes_reset(request.task_id, nodes_to_reset)
-            logger.info(f"📤 人工审核拒绝，发送节点重置消息: {nodes_to_reset}")
+            # 复用 nodes 模块里的统一节点重置逻辑，避免列表前后端漂移
+            from app.agents.nodes import _emit_nodes_reset_after_copywriter
+            await _emit_nodes_reset_after_copywriter(request.task_id)
+            logger.info(f"📤 人工审核拒绝，发送节点重置消息")
 
         # 继续执行（从 human_review 节点恢复）
         result = await app.ainvoke(None, config)

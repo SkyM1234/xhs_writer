@@ -3,6 +3,8 @@ Agent 使用的工具函数
 """
 from typing import List, Dict
 import re
+import json
+from app.core.logger import logger
 
 def extract_keywords(text: str) -> List[str]:
     """从文本中提取关键词"""
@@ -266,3 +268,111 @@ def parse_title_candidates(llm_response: str) -> list[str]:
             cleaned.append(t)
 
     return cleaned[:5]
+
+
+
+def build_image_prompt_from_json(llm_response: str) -> str:
+    """
+    解析 visual_designer 的 LLM JSON 输出，按权重拼装成丰富的图片提示词。
+
+    分段写入主体/场景/构图/光线/色彩/风格/氛围/质感，让模型有更多
+    具体锚点去生成，避免泛泛的相似图。
+
+    Args:
+        llm_response: LLM 原始返回（可能包含 markdown 代码块包裹的 JSON）
+
+    Returns:
+        拼装后的中文 prompt 字符串。解析失败时返回清理后的原始文本作为兜底。
+    """
+    import re
+
+    raw = llm_response.strip()
+
+    # 先尝试从 markdown 代码块中提取 JSON
+    parsed = None
+    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    candidates = []
+    if json_match:
+        candidates.append(json_match.group(1))
+    candidates.append(raw)
+    # 再尝试取首个 { 到末尾 } 之间的子串
+    first_brace = raw.find('{')
+    last_brace = raw.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidates.append(raw[first_brace:last_brace + 1])
+
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+            break
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    if not isinstance(parsed, dict):
+        # 解析失败，降级使用原始文本（去除引号和代码块）
+        logger.warning("⚠️ visual_designer JSON 解析失败，降级使用原始文本作为提示词")
+        return raw.strip('`').strip('"').strip("'")
+
+    # 按顺序拼装，主体和场景放最前（生图模型对前面的 token 更敏感）
+    sections = [
+        ('主体', parsed.get('subject')),
+        ('场景', parsed.get('scene')),
+        ('构图', parsed.get('composition')),
+        ('光线', parsed.get('lighting')),
+        ('色彩', parsed.get('color_palette')),
+        ('风格', parsed.get('style')),
+        ('氛围', parsed.get('mood')),
+        ('质感', parsed.get('texture_details')),
+    ]
+    parts = [f"{label}：{str(value).strip()}" for label, value in sections if value]
+    prompt = "；".join(parts)
+
+    if not prompt:
+        logger.warning("⚠️ visual_designer JSON 字段全为空，降级使用原始文本")
+        return raw.strip('`').strip('"').strip("'")
+
+    return prompt
+
+
+def build_default_titles(main_keyword: str) -> list:
+    """构建降级用的默认候选标题（5 个）"""
+    return [
+        f'🔥{main_keyword}必看！这些技巧让你少走弯路',
+        f'没想到{main_keyword}还能这样玩？我震惊了',
+        f'关于{main_keyword}，你真的了解吗？',
+        f'{main_keyword}避坑指南！新手必看',
+        f'超实用！{main_keyword}的正确打开方式',
+    ]
+
+
+async def download_images_to_outputs(image_urls: list, keywords: list, task_id: str) -> list:
+    """把图片 URL 列表下载到 data/outputs/{keyword}_{task_id}/images/ 下，返回本地路径列表
+
+    任意环节失败都只返回空列表，不抛异常（图片是非关键资产）。
+    """
+    if not image_urls:
+        return []
+
+    try:
+        from pathlib import Path
+        from app.utils.image_downloader import image_downloader
+
+        main_keyword = keywords[0] if keywords else "content"
+        output_dir = Path(__file__).parent.parent.parent / "data" / "outputs" / f"{main_keyword}_{task_id}"
+        images_dir = output_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        prefix = keywords[0] if keywords else "image"
+        local_paths = await image_downloader.download_images(
+            image_urls,
+            prefix=prefix,
+            target_dir=str(images_dir)
+        )
+        if local_paths:
+            logger.info(f"✅ 图片已下载到: {images_dir}, 共 {len(local_paths)} 张")
+        else:
+            logger.warning(f"⚠️ 图片下载返回空列表")
+        return local_paths or []
+    except Exception as download_error:
+        logger.warning(f"⚠️ 图片下载失败: {download_error}")
+        return []

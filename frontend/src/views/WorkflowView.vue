@@ -334,6 +334,13 @@ function handleProgress(message: NodeProgressMessage) {
     case 'node_error':
       logType = 'node_error'
       logContent = `错误: ${message.node_name} - ${message.error}`
+      // 节点出错，整个工作流终止
+      workflowStore.setTaskStatus('error')
+      // 关闭所有可能打开的对话框，避免 UI 卡死
+      showTitleDialog.value = false
+      showReviewDialog.value = false
+      // 断开 WebSocket，停止后续重连/心跳
+      wsService.disconnect()
       break
     case 'node_progress':
       logType = 'info'
